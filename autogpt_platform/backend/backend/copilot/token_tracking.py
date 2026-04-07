@@ -11,6 +11,7 @@ This module extracts that common logic so both paths stay in sync.
 
 import asyncio
 import logging
+import math
 import re
 import threading
 
@@ -174,7 +175,9 @@ async def persist_and_record_usage(
         cost_float = None
         if cost_usd is not None:
             try:
-                cost_float = float(cost_usd)
+                val = float(cost_usd)
+                if math.isfinite(val) and val >= 0:
+                    cost_float = val
             except (ValueError, TypeError):
                 pass
 
