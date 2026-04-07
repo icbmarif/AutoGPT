@@ -202,7 +202,7 @@ async def log_system_credential_cost(
                 "tracking_type": tracking_type,
                 "tracking_amount": tracking_amount,
             }
-            if credit_cost:
+            if credit_cost is not None:
                 meta["credit_cost"] = credit_cost
             if stats.provider_cost is not None:
                 # Use 'provider_cost_raw' — the value's unit varies by tracking

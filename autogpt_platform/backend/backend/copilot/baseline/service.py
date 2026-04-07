@@ -437,7 +437,7 @@ async def _baseline_llm_caller(
         # capture cost even when the stream errors mid-way — we already paid).
         # Accumulate across multi-round tool-calling turns.
         try:
-            raw_resp = getattr(response, "response", None)
+            raw_resp = getattr(response, "_response", None)
             if raw_resp and hasattr(raw_resp, "headers"):
                 cost_header = raw_resp.headers.get("x-total-cost")
                 if cost_header:
