@@ -730,6 +730,7 @@ async def create_store_submission(
     categories: list[str] = [],
     changes_summary: str | None = "Initial Submission",
     recommended_schedule_cron: str | None = None,
+    organization_id: str | None = None,
 ) -> store_model.StoreSubmission:
     """
     Create the first (and only) store listing and thus submission as a normal user
@@ -858,6 +859,7 @@ async def create_store_submission(
                                 "agentGraphId": graph_id,
                                 "OwningUser": {"connect": {"id": user_id}},
                                 "CreatorProfile": {"connect": {"userId": user_id}},
+                                **({"owningOrgId": organization_id} if organization_id else {}),
                             },
                         }
                     },

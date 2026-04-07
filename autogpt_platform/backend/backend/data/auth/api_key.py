@@ -29,6 +29,9 @@ class APIKeyInfo(APIAuthorizationInfo):
     )
     status: APIKeyStatus
     description: Optional[str] = None
+    organization_id: Optional[str] = None
+    owner_type: Optional[str] = None
+    team_id_restriction: Optional[str] = None
 
     type: Literal["api_key"] = "api_key"  # type: ignore
 
@@ -46,6 +49,9 @@ class APIKeyInfo(APIAuthorizationInfo):
             revoked_at=api_key.revokedAt,
             description=api_key.description,
             user_id=api_key.userId,
+            organization_id=api_key.organizationId,
+            owner_type=api_key.ownerType,
+            team_id_restriction=api_key.teamIdRestriction,
         )
 
 
@@ -74,6 +80,9 @@ async def create_api_key(
     user_id: str,
     permissions: list[APIKeyPermission],
     description: Optional[str] = None,
+    organization_id: Optional[str] = None,
+    owner_type: Optional[str] = None,
+    team_id_restriction: Optional[str] = None,
 ) -> tuple[APIKeyInfo, str]:
     """
     Generate a new API key and store it in the database.
@@ -81,19 +90,25 @@ async def create_api_key(
     """
     generated_key = keysmith.generate_key()
 
-    saved_key_obj = await PrismaAPIKey.prisma().create(
-        data={
-            "id": str(uuid.uuid4()),
-            "name": name,
-            "head": generated_key.head,
-            "tail": generated_key.tail,
-            "hash": generated_key.hash,
-            "salt": generated_key.salt,
-            "permissions": [p for p in permissions],
-            "description": description,
-            "userId": user_id,
-        }
-    )
+    create_data: dict[str, object] = {
+        "id": str(uuid.uuid4()),
+        "name": name,
+        "head": generated_key.head,
+        "tail": generated_key.tail,
+        "hash": generated_key.hash,
+        "salt": generated_key.salt,
+        "permissions": [p for p in permissions],
+        "description": description,
+        "userId": user_id,
+    }
+    if organization_id is not None:
+        create_data["organizationId"] = organization_id
+    if owner_type is not None:
+        create_data["ownerType"] = owner_type
+    if team_id_restriction is not None:
+        create_data["teamIdRestriction"] = team_id_restriction
+
+    saved_key_obj = await PrismaAPIKey.prisma().create(data=create_data)  # type: ignore
 
     return APIKeyInfo.from_db(saved_key_obj), generated_key.key
 

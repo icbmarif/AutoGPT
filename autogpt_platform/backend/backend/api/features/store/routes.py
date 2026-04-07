@@ -384,6 +384,9 @@ async def get_submissions(
 async def create_submission(
     submission_request: store_model.StoreSubmissionRequest,
     user_id: str = Security(autogpt_libs.auth.get_user_id),
+    ctx: autogpt_libs.auth.RequestContext = Security(
+        autogpt_libs.auth.get_request_context
+    ),
 ) -> store_model.StoreSubmission:
     """Submit a new marketplace listing for review"""
     result = await store_db.create_store_submission(
@@ -401,6 +404,7 @@ async def create_submission(
         categories=submission_request.categories,
         changes_summary=submission_request.changes_summary or "Initial Submission",
         recommended_schedule_cron=submission_request.recommended_schedule_cron,
+        organization_id=ctx.org_id,
     )
     return result
 

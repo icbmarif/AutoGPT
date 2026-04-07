@@ -36,6 +36,7 @@ import backend.api.features.otto.routes
 import backend.api.features.postmark.postmark
 import backend.api.features.store.model
 import backend.api.features.store.routes
+import backend.api.features.transfers.routes as transfer_routes
 import backend.api.features.v1
 import backend.api.features.workspace.routes as team_routes
 import backend.data.block
@@ -390,6 +391,11 @@ app.include_router(
     backend.api.features.orgs.invitation_routes.router,
     tags=["v2", "invitations"],
     prefix="/api/invitations",
+)
+app.include_router(
+    transfer_routes.router,
+    tags=["v2", "transfers"],
+    prefix="/api/transfers",
 )
 
 app.mount("/external-api", external_api)

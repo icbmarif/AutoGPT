@@ -114,6 +114,9 @@ def _make_api_key_row(
     m.permissions = permissions or []
     m.description = description
     m.createdAt = datetime(2025, 6, 1, tzinfo=timezone.utc)
+    m.organizationId = None
+    m.ownerType = None
+    m.teamIdRestriction = None
     m.lastUsedAt = None
     m.revokedAt = None
     return m

@@ -1503,7 +1503,9 @@ async def delete_graph_execution_schedule(
     dependencies=[Security(requires_user)],
 )
 async def create_api_key(
-    request: CreateAPIKeyRequest, user_id: Annotated[str, Security(get_user_id)]
+    request: CreateAPIKeyRequest,
+    user_id: Annotated[str, Security(get_user_id)],
+    ctx: Annotated[RequestContext, Security(get_request_context)],
 ) -> CreateAPIKeyResponse:
     """Create a new API key"""
     api_key_info, plain_text_key = await api_key_db.create_api_key(
@@ -1511,6 +1513,7 @@ async def create_api_key(
         user_id=user_id,
         permissions=request.permissions,
         description=request.description,
+        organization_id=ctx.org_id if ctx.org_id else None,
     )
     return CreateAPIKeyResponse(api_key=api_key_info, plain_text_key=plain_text_key)
 
