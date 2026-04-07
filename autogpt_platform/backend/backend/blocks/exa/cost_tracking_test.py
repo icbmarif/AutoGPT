@@ -208,3 +208,127 @@ class TestExaContentsCostTracking:
 
         assert len(merged) == 1
         assert merged[0].provider_cost == pytest.approx(0.0)
+
+
+class TestExaSearchCostTracking:
+    """ExaSearchBlock merges cost_dollars.total as provider_cost."""
+
+    @pytest.mark.asyncio
+    async def test_cost_dollars_total_is_merged(self):
+        """When the SDK response includes cost_dollars, its total is merged."""
+        from backend.blocks.exa.helpers import CostDollars
+        from backend.blocks.exa.search import ExaSearchBlock
+
+        block = ExaSearchBlock()
+        merged: list[NodeExecutionStats] = []
+        block.merge_stats = lambda s: merged.append(s)  # type: ignore[assignment]
+
+        mock_sdk_response = MagicMock()
+        mock_sdk_response.results = []
+        mock_sdk_response.context = None
+        mock_sdk_response.resolved_search_type = None
+        mock_sdk_response.cost_dollars = CostDollars(total=0.008)
+
+        with patch("backend.blocks.exa.search.AsyncExa") as mock_exa_cls:
+            mock_exa = MagicMock()
+            mock_exa.search = AsyncMock(return_value=mock_sdk_response)
+            mock_exa_cls.return_value = mock_exa
+
+            async for _ in block.run(
+                block.Input(query="test query", credentials=TEST_CREDENTIALS_INPUT),  # type: ignore[arg-type]
+                credentials=TEST_CREDENTIALS,
+            ):
+                pass
+
+        assert len(merged) == 1
+        assert merged[0].provider_cost == pytest.approx(0.008)
+
+    @pytest.mark.asyncio
+    async def test_no_cost_dollars_skips_merge(self):
+        """When cost_dollars is absent, merge_stats is not called."""
+        from backend.blocks.exa.search import ExaSearchBlock
+
+        block = ExaSearchBlock()
+        merged: list[NodeExecutionStats] = []
+        block.merge_stats = lambda s: merged.append(s)  # type: ignore[assignment]
+
+        mock_sdk_response = MagicMock()
+        mock_sdk_response.results = []
+        mock_sdk_response.context = None
+        mock_sdk_response.resolved_search_type = None
+        mock_sdk_response.cost_dollars = None
+
+        with patch("backend.blocks.exa.search.AsyncExa") as mock_exa_cls:
+            mock_exa = MagicMock()
+            mock_exa.search = AsyncMock(return_value=mock_sdk_response)
+            mock_exa_cls.return_value = mock_exa
+
+            async for _ in block.run(
+                block.Input(query="test query", credentials=TEST_CREDENTIALS_INPUT),  # type: ignore[arg-type]
+                credentials=TEST_CREDENTIALS,
+            ):
+                pass
+
+        assert len(merged) == 0
+
+
+class TestExaSimilarCostTracking:
+    """ExaFindSimilarBlock merges cost_dollars.total as provider_cost."""
+
+    @pytest.mark.asyncio
+    async def test_cost_dollars_total_is_merged(self):
+        """When the SDK response includes cost_dollars, its total is merged."""
+        from backend.blocks.exa.helpers import CostDollars
+        from backend.blocks.exa.similar import ExaFindSimilarBlock
+
+        block = ExaFindSimilarBlock()
+        merged: list[NodeExecutionStats] = []
+        block.merge_stats = lambda s: merged.append(s)  # type: ignore[assignment]
+
+        mock_sdk_response = MagicMock()
+        mock_sdk_response.results = []
+        mock_sdk_response.context = None
+        mock_sdk_response.request_id = "req-1"
+        mock_sdk_response.cost_dollars = CostDollars(total=0.015)
+
+        with patch("backend.blocks.exa.similar.AsyncExa") as mock_exa_cls:
+            mock_exa = MagicMock()
+            mock_exa.find_similar = AsyncMock(return_value=mock_sdk_response)
+            mock_exa_cls.return_value = mock_exa
+
+            async for _ in block.run(
+                block.Input(url="https://example.com", credentials=TEST_CREDENTIALS_INPUT),  # type: ignore[arg-type]
+                credentials=TEST_CREDENTIALS,
+            ):
+                pass
+
+        assert len(merged) == 1
+        assert merged[0].provider_cost == pytest.approx(0.015)
+
+    @pytest.mark.asyncio
+    async def test_no_cost_dollars_skips_merge(self):
+        """When cost_dollars is absent, merge_stats is not called."""
+        from backend.blocks.exa.similar import ExaFindSimilarBlock
+
+        block = ExaFindSimilarBlock()
+        merged: list[NodeExecutionStats] = []
+        block.merge_stats = lambda s: merged.append(s)  # type: ignore[assignment]
+
+        mock_sdk_response = MagicMock()
+        mock_sdk_response.results = []
+        mock_sdk_response.context = None
+        mock_sdk_response.request_id = "req-2"
+        mock_sdk_response.cost_dollars = None
+
+        with patch("backend.blocks.exa.similar.AsyncExa") as mock_exa_cls:
+            mock_exa = MagicMock()
+            mock_exa.find_similar = AsyncMock(return_value=mock_sdk_response)
+            mock_exa_cls.return_value = mock_exa
+
+            async for _ in block.run(
+                block.Input(url="https://example.com", credentials=TEST_CREDENTIALS_INPUT),  # type: ignore[arg-type]
+                credentials=TEST_CREDENTIALS,
+            ):
+                pass
+
+        assert len(merged) == 0

@@ -501,3 +501,39 @@ class TestPlatformCostLogging:
         assert entry.metadata["cache_read_tokens"] == 5000
         assert entry.metadata["cache_creation_tokens"] == 300
         assert entry.metadata["source"] == "copilot"
+
+    @pytest.mark.asyncio
+    async def test_logs_cost_only_when_tokens_zero(self):
+        """Zero prompt+completion tokens with cost_usd set still logs the entry."""
+        mock_log = AsyncMock()
+        with (
+            patch(
+                "backend.copilot.token_tracking.record_token_usage",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "backend.copilot.token_tracking.platform_cost_db",
+                return_value=type(
+                    "FakePlatformCostDb", (), {"log_platform_cost": mock_log}
+                )(),
+            ),
+        ):
+            await persist_and_record_usage(
+                session=None,
+                user_id="user-cached",
+                prompt_tokens=0,
+                completion_tokens=0,
+                cost_usd=0.005,
+                model="claude-3-5-sonnet",
+                provider="anthropic",
+                log_prefix="[SDK]",
+            )
+            await asyncio.sleep(0)
+        # Guard: total_tokens == 0 but cost_usd is set — must still log
+        mock_log.assert_awaited_once()
+        entry = mock_log.call_args[0][0]
+        assert entry.user_id == "user-cached"
+        assert entry.tracking_type == "cost_usd"
+        assert entry.cost_microdollars == 5000
+        assert entry.input_tokens == 0
+        assert entry.output_tokens == 0

@@ -95,8 +95,14 @@ export function usePlatformCostContent(searchParams: InitialSearchParams) {
     });
   }
 
-  function handleRateOverride(key: string, val: number) {
-    setRateOverrides((prev) => ({ ...prev, [key]: val }));
+  function handleRateOverride(key: string, val: number | null) {
+    setRateOverrides((prev) => {
+      if (val === null) {
+        const { [key]: _, ...rest } = prev;
+        return rest;
+      }
+      return { ...prev, [key]: val };
+    });
   }
 
   const totalEstimatedCost =

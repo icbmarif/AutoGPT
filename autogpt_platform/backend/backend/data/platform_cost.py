@@ -105,38 +105,6 @@ async def log_platform_cost_safe(entry: PlatformCostEntry) -> None:
         )
 
 
-# Hold strong references to in-flight log tasks to prevent GC.
-# Tasks remove themselves on completion via add_done_callback.
-# Concurrent DB inserts are bounded by _log_semaphore (50) to provide
-# back-pressure under high load or DB slowness.
-_pending_log_tasks: set["asyncio.Task[None]"] = set()
-
-
-def schedule_cost_log(entry: PlatformCostEntry) -> None:
-    """Schedule a fire-and-forget cost log insert.
-
-    Shared by cost_tracking and token_tracking so both modules drain
-    the same task set during shutdown.
-    """
-    task = asyncio.create_task(log_platform_cost_safe(entry))
-    _pending_log_tasks.add(task)
-    task.add_done_callback(_pending_log_tasks.discard)
-
-
-async def drain_pending_cost_logs() -> None:
-    """Await all in-flight cost log tasks before shutdown.
-
-    Call this from ExecutionManager.cleanup() (or equivalent teardown hook)
-    to ensure no cost entries are silently dropped during a rolling deployment.
-    Tasks that were already completed are no-ops; only genuinely in-flight
-    tasks cause a real wait.
-    """
-    pending = list(_pending_log_tasks)
-    if pending:
-        logger.info("Draining %d pending cost log task(s)…", len(pending))
-        await asyncio.gather(*pending, return_exceptions=True)
-
-
 def _json_or_none(data: dict[str, Any] | None) -> str | None:
     if data is None:
         return None

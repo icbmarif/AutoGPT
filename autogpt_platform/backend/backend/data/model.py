@@ -867,23 +867,12 @@ class NodeExecutionStats(BaseModel):
         if not isinstance(other, NodeExecutionStats):
             return NotImplemented
 
-        # vars() returns __dict__ for fields that are set (plus extras via
-        # model_config.extra='allow') — much cheaper than model_dump() which
-        # validates + serialises every field.
-        #
-        # Pydantic v2 stores all field values in __dict__, so vars() is
-        # equivalent to model_dump() for our declared fields. Internal keys
-        # (__pydantic_fields_set__, etc.) start with __ and are harmless —
-        # setattr on those would update the instance's private Pydantic state,
-        # but in practice they don't appear in __dict__ for field keys.
-        other_fields = vars(other)
-        self_fields = vars(self)
-
-        for key, value in other_fields.items():
+        for key in type(other).model_fields:
+            value = getattr(other, key)
             if value is None:
                 # Never overwrite an existing value with None
                 continue
-            current = self_fields.get(key)
+            current = getattr(self, key, None)
             if current is None:
                 # Field doesn't exist yet or is None, just set it
                 setattr(self, key, value)

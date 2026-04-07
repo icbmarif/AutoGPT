@@ -13,6 +13,7 @@ import ollama
 import openai
 from anthropic.types import ToolParam
 from groq import AsyncGroq
+from openai.types.chat import ChatCompletion as OpenAIChatCompletion
 from pydantic import BaseModel, SecretStr
 
 from backend.blocks._base import (
@@ -772,7 +773,7 @@ def convert_openai_tool_fmt_to_anthropic(
     return anthropic_tools
 
 
-def extract_openrouter_cost(response) -> float | None:
+def extract_openrouter_cost(response: OpenAIChatCompletion) -> float | None:
     """Extract OpenRouter's `x-total-cost` header from an OpenAI SDK response.
 
     OpenRouter returns the per-request USD cost in a response header. The

@@ -12,7 +12,7 @@ import { TrackingBadge } from "./TrackingBadge";
 interface Props {
   data: ProviderCostSummary[];
   rateOverrides: Record<string, number>;
-  onRateOverride: (key: string, val: number) => void;
+  onRateOverride: (key: string, val: number | null) => void;
 }
 
 function ProviderTable({ data, rateOverrides, onRateOverride }: Props) {
@@ -79,7 +79,7 @@ function ProviderTable({ data, rateOverrides, onRateOverride }: Props) {
                           const val = parseFloat(e.target.value);
                           if (!isNaN(val)) onRateOverride(key, val);
                           else if (e.target.value === "")
-                            onRateOverride(key, 0);
+                            onRateOverride(key, null);
                         }}
                       />
                       <span

@@ -41,8 +41,8 @@ async def drain_pending_cost_logs(timeout: float = 5.0) -> None:
 
     Drains both the executor cost log tasks (_pending_log_tasks in this module,
     used for block execution cost tracking via DatabaseManagerAsyncClient) and
-    the copilot cost log tasks (from platform_cost.schedule_cost_log, used by
-    token_tracking for copilot LLM turns).
+    the copilot cost log tasks (token_tracking._pending_log_tasks, used for
+    copilot LLM turns via platform_cost_db()).
 
     Call this during graceful shutdown to flush pending INSERT tasks before
     the process exits. Tasks that don't complete within `timeout` seconds are
