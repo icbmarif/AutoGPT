@@ -332,3 +332,244 @@ class TestExaSimilarCostTracking:
                 pass
 
         assert len(merged) == 0
+
+
+# ---------------------------------------------------------------------------
+# ExaCreateResearchBlock — cost_dollars from completed poll response
+# ---------------------------------------------------------------------------
+
+
+COMPLETED_RESEARCH_RESPONSE = {
+    "researchId": "test-research-id",
+    "status": "completed",
+    "model": "exa-research",
+    "instructions": "test instructions",
+    "createdAt": 1700000000000,
+    "finishedAt": 1700000060000,
+    "costDollars": {
+        "total": 0.05,
+        "numSearches": 3,
+        "numPages": 10,
+        "reasoningTokens": 500,
+    },
+    "output": {"content": "Research findings...", "parsed": None},
+}
+
+PENDING_RESEARCH_RESPONSE = {
+    "researchId": "test-research-id",
+    "status": "pending",
+    "model": "exa-research",
+    "instructions": "test instructions",
+    "createdAt": 1700000000000,
+}
+
+
+class TestExaCreateResearchBlockCostTracking:
+    """ExaCreateResearchBlock merges cost from completed poll response."""
+
+    @pytest.mark.asyncio
+    async def test_cost_merged_when_research_completes(self):
+        """merge_stats called with provider_cost=total when poll returns completed."""
+        from backend.blocks.exa.research import ExaCreateResearchBlock
+
+        block = ExaCreateResearchBlock()
+        merged: list[NodeExecutionStats] = []
+        block.merge_stats = lambda s: merged.append(s)  # type: ignore[assignment]
+
+        create_resp = MagicMock()
+        create_resp.json.return_value = PENDING_RESEARCH_RESPONSE
+
+        poll_resp = MagicMock()
+        poll_resp.json.return_value = COMPLETED_RESEARCH_RESPONSE
+
+        mock_instance = MagicMock()
+        mock_instance.post = AsyncMock(return_value=create_resp)
+        mock_instance.get = AsyncMock(return_value=poll_resp)
+
+        with (
+            patch("backend.blocks.exa.research.Requests", return_value=mock_instance),
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            async for _ in block.run(
+                block.Input(
+                    instructions="test instructions",
+                    wait_for_completion=True,
+                    credentials=TEST_CREDENTIALS_INPUT,  # type: ignore[arg-type]
+                ),
+                credentials=TEST_CREDENTIALS,
+            ):
+                pass
+
+        assert len(merged) == 1
+        assert merged[0].provider_cost == pytest.approx(0.05)
+
+    @pytest.mark.asyncio
+    async def test_no_merge_when_no_cost_dollars(self):
+        """When completed response has no costDollars, merge_stats is not called."""
+        from backend.blocks.exa.research import ExaCreateResearchBlock
+
+        block = ExaCreateResearchBlock()
+        merged: list[NodeExecutionStats] = []
+        block.merge_stats = lambda s: merged.append(s)  # type: ignore[assignment]
+
+        no_cost_response = {**COMPLETED_RESEARCH_RESPONSE, "costDollars": None}
+        create_resp = MagicMock()
+        create_resp.json.return_value = PENDING_RESEARCH_RESPONSE
+        poll_resp = MagicMock()
+        poll_resp.json.return_value = no_cost_response
+
+        mock_instance = MagicMock()
+        mock_instance.post = AsyncMock(return_value=create_resp)
+        mock_instance.get = AsyncMock(return_value=poll_resp)
+
+        with (
+            patch("backend.blocks.exa.research.Requests", return_value=mock_instance),
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            async for _ in block.run(
+                block.Input(
+                    instructions="test instructions",
+                    wait_for_completion=True,
+                    credentials=TEST_CREDENTIALS_INPUT,  # type: ignore[arg-type]
+                ),
+                credentials=TEST_CREDENTIALS,
+            ):
+                pass
+
+        assert merged == []
+
+
+# ---------------------------------------------------------------------------
+# ExaGetResearchBlock — cost_dollars from single GET response
+# ---------------------------------------------------------------------------
+
+
+class TestExaGetResearchBlockCostTracking:
+    """ExaGetResearchBlock merges cost when the fetched research has cost_dollars."""
+
+    @pytest.mark.asyncio
+    async def test_cost_merged_from_completed_research(self):
+        """merge_stats called with provider_cost=total when research has costDollars."""
+        from backend.blocks.exa.research import ExaGetResearchBlock
+
+        block = ExaGetResearchBlock()
+        merged: list[NodeExecutionStats] = []
+        block.merge_stats = lambda s: merged.append(s)  # type: ignore[assignment]
+
+        get_resp = MagicMock()
+        get_resp.json.return_value = COMPLETED_RESEARCH_RESPONSE
+
+        mock_instance = MagicMock()
+        mock_instance.get = AsyncMock(return_value=get_resp)
+
+        with patch("backend.blocks.exa.research.Requests", return_value=mock_instance):
+            async for _ in block.run(
+                block.Input(
+                    research_id="test-research-id",
+                    credentials=TEST_CREDENTIALS_INPUT,  # type: ignore[arg-type]
+                ),
+                credentials=TEST_CREDENTIALS,
+            ):
+                pass
+
+        assert len(merged) == 1
+        assert merged[0].provider_cost == pytest.approx(0.05)
+
+    @pytest.mark.asyncio
+    async def test_no_merge_when_no_cost_dollars(self):
+        """When research has no costDollars, merge_stats is not called."""
+        from backend.blocks.exa.research import ExaGetResearchBlock
+
+        block = ExaGetResearchBlock()
+        merged: list[NodeExecutionStats] = []
+        block.merge_stats = lambda s: merged.append(s)  # type: ignore[assignment]
+
+        no_cost_response = {**COMPLETED_RESEARCH_RESPONSE, "costDollars": None}
+        get_resp = MagicMock()
+        get_resp.json.return_value = no_cost_response
+
+        mock_instance = MagicMock()
+        mock_instance.get = AsyncMock(return_value=get_resp)
+
+        with patch("backend.blocks.exa.research.Requests", return_value=mock_instance):
+            async for _ in block.run(
+                block.Input(
+                    research_id="test-research-id",
+                    credentials=TEST_CREDENTIALS_INPUT,  # type: ignore[arg-type]
+                ),
+                credentials=TEST_CREDENTIALS,
+            ):
+                pass
+
+        assert merged == []
+
+
+# ---------------------------------------------------------------------------
+# ExaWaitForResearchBlock — cost_dollars from polling response
+# ---------------------------------------------------------------------------
+
+
+class TestExaWaitForResearchBlockCostTracking:
+    """ExaWaitForResearchBlock merges cost when the polled research has cost_dollars."""
+
+    @pytest.mark.asyncio
+    async def test_cost_merged_when_research_completes(self):
+        """merge_stats called with provider_cost=total once polling returns completed."""
+        from backend.blocks.exa.research import ExaWaitForResearchBlock
+
+        block = ExaWaitForResearchBlock()
+        merged: list[NodeExecutionStats] = []
+        block.merge_stats = lambda s: merged.append(s)  # type: ignore[assignment]
+
+        poll_resp = MagicMock()
+        poll_resp.json.return_value = COMPLETED_RESEARCH_RESPONSE
+
+        mock_instance = MagicMock()
+        mock_instance.get = AsyncMock(return_value=poll_resp)
+
+        with (
+            patch("backend.blocks.exa.research.Requests", return_value=mock_instance),
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            async for _ in block.run(
+                block.Input(
+                    research_id="test-research-id",
+                    credentials=TEST_CREDENTIALS_INPUT,  # type: ignore[arg-type]
+                ),
+                credentials=TEST_CREDENTIALS,
+            ):
+                pass
+
+        assert len(merged) == 1
+        assert merged[0].provider_cost == pytest.approx(0.05)
+
+    @pytest.mark.asyncio
+    async def test_no_merge_when_no_cost_dollars(self):
+        """When completed research has no costDollars, merge_stats is not called."""
+        from backend.blocks.exa.research import ExaWaitForResearchBlock
+
+        block = ExaWaitForResearchBlock()
+        merged: list[NodeExecutionStats] = []
+        block.merge_stats = lambda s: merged.append(s)  # type: ignore[assignment]
+
+        no_cost_response = {**COMPLETED_RESEARCH_RESPONSE, "costDollars": None}
+        poll_resp = MagicMock()
+        poll_resp.json.return_value = no_cost_response
+
+        mock_instance = MagicMock()
+        mock_instance.get = AsyncMock(return_value=poll_resp)
+
+        with (
+            patch("backend.blocks.exa.research.Requests", return_value=mock_instance),
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            async for _ in block.run(
+                block.Input(
+                    research_id="test-research-id",
+                    credentials=TEST_CREDENTIALS_INPUT,  # type: ignore[arg-type]
+                ),
+                credentials=TEST_CREDENTIALS,
+            ):
+                pass
+
+        assert merged == []

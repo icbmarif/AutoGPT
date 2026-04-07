@@ -635,3 +635,78 @@ class TestSmartLeadAddLeadsBlockCostTracking:
         assert len(accumulated) == 1
         assert accumulated[0].provider_cost == 2.0
         assert accumulated[0].provider_cost_type == "items"
+
+
+# ---------------------------------------------------------------------------
+# SearchPeopleBlock — item count from people list length
+# ---------------------------------------------------------------------------
+
+
+class TestSearchPeopleBlockCostTracking:
+    @pytest.mark.asyncio
+    async def test_merge_stats_called_with_people_count(self):
+        """provider_cost equals number of returned people, type == 'items'."""
+        from backend.blocks.apollo._auth import TEST_CREDENTIALS as APOLLO_CREDS
+        from backend.blocks.apollo._auth import (
+            TEST_CREDENTIALS_INPUT as APOLLO_CREDS_INPUT,
+        )
+        from backend.blocks.apollo.models import Contact
+        from backend.blocks.apollo.people import SearchPeopleBlock
+
+        block = SearchPeopleBlock()
+        fake_people = [Contact(id=str(i), first_name=f"Person{i}") for i in range(5)]
+        accumulated: list[NodeExecutionStats] = []
+
+        with (
+            patch.object(
+                SearchPeopleBlock,
+                "search_people",
+                new_callable=AsyncMock,
+                return_value=fake_people,
+            ),
+            patch.object(
+                block, "merge_stats", side_effect=lambda s: accumulated.append(s)
+            ),
+        ):
+            input_data = SearchPeopleBlock.Input(
+                credentials=APOLLO_CREDS_INPUT,  # type: ignore[arg-type]
+            )
+            async for _ in block.run(input_data, credentials=APOLLO_CREDS):
+                pass
+
+        assert len(accumulated) == 1
+        assert accumulated[0].provider_cost == pytest.approx(5.0)
+        assert accumulated[0].provider_cost_type == "items"
+
+    @pytest.mark.asyncio
+    async def test_empty_people_list_tracks_zero(self):
+        """An empty people list results in provider_cost=0.0."""
+        from backend.blocks.apollo._auth import TEST_CREDENTIALS as APOLLO_CREDS
+        from backend.blocks.apollo._auth import (
+            TEST_CREDENTIALS_INPUT as APOLLO_CREDS_INPUT,
+        )
+        from backend.blocks.apollo.people import SearchPeopleBlock
+
+        block = SearchPeopleBlock()
+        accumulated: list[NodeExecutionStats] = []
+
+        with (
+            patch.object(
+                SearchPeopleBlock,
+                "search_people",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch.object(
+                block, "merge_stats", side_effect=lambda s: accumulated.append(s)
+            ),
+        ):
+            input_data = SearchPeopleBlock.Input(
+                credentials=APOLLO_CREDS_INPUT,  # type: ignore[arg-type]
+            )
+            async for _ in block.run(input_data, credentials=APOLLO_CREDS):
+                pass
+
+        assert len(accumulated) == 1
+        assert accumulated[0].provider_cost == 0.0
+        assert accumulated[0].provider_cost_type == "items"
