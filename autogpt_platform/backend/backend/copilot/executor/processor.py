@@ -151,8 +151,8 @@ class CoPilotProcessor:
         This method is called once per worker thread to set up the async event
         loop and initialize any required resources.
 
-        Database is accessed only through DatabaseManager, so we don't need to connect
-        to Prisma directly.
+        Prisma is connected here so that schedule_cost_log() in token_tracking.py
+        can write PlatformCostLog entries via execute_raw_with_schema() directly.
         """
         configure_logging()
         set_service_name("CoPilotExecutor")
@@ -162,6 +162,14 @@ class CoPilotProcessor:
             target=self.execution_loop.run_forever, daemon=True
         )
         self.execution_thread.start()
+
+        # Connect Prisma so that schedule_cost_log() (used by token_tracking.py
+        # for copilot cost tracking) can write PlatformCostLog rows directly.
+        from backend.data import db as db_module
+
+        asyncio.run_coroutine_threadsafe(
+            db_module.connect(), self.execution_loop
+        ).result(timeout=30)
 
         # Skip the SDK's per-request CLI version check — the bundled CLI is
         # already version-matched to the SDK package.
