@@ -36,8 +36,10 @@ component_management:
     statuses:
       - type: project
         target: auto
+        informational: true
       - type: patch
         target: 80%
+        informational: true
   individual_components:
     - component_id: platform-backend
       name: "Platform Backend"
