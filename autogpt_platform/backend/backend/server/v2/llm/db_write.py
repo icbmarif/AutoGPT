@@ -575,5 +575,14 @@ async def revert_migration(
 
 
 async def refresh_runtime_caches() -> None:
-    """Refresh the LLM registry and clear all related caches."""
+    """Invalidate the shared Redis cache, refresh this process, notify other workers."""
+    from backend.data.llm_registry.notifications import (
+        publish_registry_refresh_notification,
+    )
+
+    # Invalidate Redis so the next fetch hits the DB.
+    llm_registry.clear_registry_cache()
+    # Refresh this process (also repopulates Redis via @cached(shared_cache=True)).
     await llm_registry.refresh_llm_registry()
+    # Tell other workers to reload their in-process cache from the fresh Redis data.
+    await publish_registry_refresh_notification()
