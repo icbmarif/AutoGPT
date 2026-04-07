@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import threading
 from typing import TYPE_CHECKING, Any, cast
 
 from backend.blocks._base import Block, BlockSchema
@@ -33,7 +34,10 @@ _WALLTIME_BILLED_PROVIDERS = frozenset(
 
 # Hold strong references to in-flight log tasks so the event loop doesn't
 # garbage-collect them mid-execution. Tasks remove themselves on completion.
+# _pending_log_tasks_lock guards all reads and writes: worker threads call
+# discard() via done callbacks while drain_pending_cost_logs() iterates.
 _pending_log_tasks: set[asyncio.Task] = set()
+_pending_log_tasks_lock = threading.Lock()
 # Per-loop semaphores: asyncio.Semaphore is not thread-safe and must not be
 # shared across event loops running in different threads. Key by loop instance
 # so each executor worker thread gets its own semaphore.
@@ -64,8 +68,11 @@ async def drain_pending_cost_logs(timeout: float = 5.0) -> None:
     # asyncio.wait() requires all tasks to belong to the running event loop.
     # _pending_log_tasks is shared across executor worker threads (each with
     # its own loop), so filter to only tasks owned by the current loop.
+    # Acquire the lock to take a consistent snapshot (worker threads call
+    # discard() via done callbacks concurrently with this iteration).
     current_loop = asyncio.get_running_loop()
-    all_pending = [t for t in _pending_log_tasks if t.get_loop() is current_loop]
+    with _pending_log_tasks_lock:
+        all_pending = [t for t in _pending_log_tasks if t.get_loop() is current_loop]
     if all_pending:
         logger.info("Draining %d executor cost log task(s)", len(all_pending))
         _, still_pending = await asyncio.wait(all_pending, timeout=timeout)
@@ -80,7 +87,8 @@ async def drain_pending_cost_logs(timeout: float = 5.0) -> None:
         _pending_log_tasks as _copilot_tasks,
     )
 
-    copilot_pending = [t for t in _copilot_tasks if t.get_loop() is current_loop]
+    with _pending_log_tasks_lock:
+        copilot_pending = [t for t in _copilot_tasks if t.get_loop() is current_loop]
     if copilot_pending:
         logger.info("Draining %d copilot cost log task(s)", len(copilot_pending))
         _, still_pending = await asyncio.wait(copilot_pending, timeout=timeout)
@@ -108,8 +116,14 @@ def _schedule_log(
                 )
 
     task = asyncio.create_task(_safe_log())
-    _pending_log_tasks.add(task)
-    task.add_done_callback(_pending_log_tasks.discard)
+    with _pending_log_tasks_lock:
+        _pending_log_tasks.add(task)
+
+    def _remove(t: asyncio.Task) -> None:
+        with _pending_log_tasks_lock:
+            _pending_log_tasks.discard(t)
+
+    task.add_done_callback(_remove)
 
 
 def _extract_model_name(raw: str | dict | None) -> str | None:

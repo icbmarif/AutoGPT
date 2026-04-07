@@ -228,7 +228,7 @@ async def get_platform_cost_dashboard(
         start = datetime.now(timezone.utc) - timedelta(days=DEFAULT_DASHBOARD_DAYS)
     where_p, params_p = _build_where(start, end, provider, user_id, "p")
 
-    by_provider_rows, by_user_rows = await asyncio.gather(
+    by_provider_rows, by_user_rows, total_user_rows = await asyncio.gather(
         query_raw_with_schema(
             f"""
             SELECT
@@ -266,11 +266,19 @@ async def get_platform_cost_dashboard(
             """,
             *params_p,
         ),
+        query_raw_with_schema(
+            f"""
+            SELECT COUNT(DISTINCT p."userId")::bigint AS cnt
+            FROM {{schema_prefix}}"PlatformCostLog" p
+            WHERE {where_p}
+            """,
+            *params_p,
+        ),
     )
 
-    # Derive total_users from by_user rows rather than a separate
-    # COUNT(DISTINCT userId) query — avoids a full-table scan.
-    total_users = len(by_user_rows)
+    # Use the exact COUNT(DISTINCT userId) so total_users is not capped at
+    # MAX_USER_ROWS (which would silently report 100 for >100 active users).
+    total_users = int(total_user_rows[0]["cnt"]) if total_user_rows else 0
     total_cost = sum(r["total_cost"] for r in by_provider_rows)
     total_requests = sum(r["request_count"] for r in by_provider_rows)
 
