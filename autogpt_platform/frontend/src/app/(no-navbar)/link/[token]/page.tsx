@@ -51,8 +51,6 @@ export default function PlatformLinkPage() {
   async function handleLink() {
     const serverName =
       state.status === "ready" ? state.serverName : null;
-    const platform =
-      state.status === "ready" ? state.platform : null;
 
     setState({ status: "linking" });
 
