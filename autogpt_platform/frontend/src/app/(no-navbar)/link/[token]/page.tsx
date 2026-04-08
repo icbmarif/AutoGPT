@@ -4,7 +4,12 @@ import { Button } from "@/components/atoms/Button/Button";
 import { AuthCard } from "@/components/auth/AuthCard";
 import { Text } from "@/components/atoms/Text/Text";
 import { useSupabase } from "@/lib/supabase/hooks/useSupabase";
-import { CheckCircle, LinkBreak, Spinner, Warning } from "@phosphor-icons/react";
+import {
+  CheckCircle,
+  LinkBreak,
+  Spinner,
+  Warning,
+} from "@phosphor-icons/react";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
@@ -49,8 +54,7 @@ export default function PlatformLinkPage() {
   }, [token, user, isUserLoading]);
 
   async function handleLink() {
-    const serverName =
-      state.status === "ready" ? state.serverName : null;
+    const serverName = state.status === "ready" ? state.serverName : null;
 
     setState({ status: "linking" });
 
@@ -82,7 +86,8 @@ export default function PlatformLinkPage() {
       const data = await res.json();
       setState({
         status: "success",
-        platform: PLATFORM_NAMES[data.platform as string] ?? (data.platform as string),
+        platform:
+          PLATFORM_NAMES[data.platform as string] ?? (data.platform as string),
         serverName: (data.server_name as string | null) ?? serverName,
       });
     } catch (err) {
@@ -190,7 +195,8 @@ function ReadyView({
   serverName: string | null;
   platform: string | null;
 }) {
-  const serverLabel = serverName ?? (platform ? `this ${platform} server` : "your server");
+  const serverLabel =
+    serverName ?? (platform ? `this ${platform} server` : "your server");
   const platformLabel = platform ?? "your chat platform";
 
   return (
@@ -207,18 +213,10 @@ function ReadyView({
             What happens when you confirm:
           </Text>
           <ul className="mt-3 space-y-2 text-sm text-muted-foreground">
-            <li>
-              ✅ {serverLabel} will be connected to your AutoGPT account
-            </li>
-            <li>
-              ✅ Everyone in the server can chat with CoPilot immediately
-            </li>
-            <li>
-              ✅ Each person gets their own private conversation
-            </li>
-            <li>
-              ✅ All conversations appear in your AutoGPT account
-            </li>
+            <li>✅ {serverLabel} will be connected to your AutoGPT account</li>
+            <li>✅ Everyone in the server can chat with CoPilot immediately</li>
+            <li>✅ Each person gets their own private conversation</li>
+            <li>✅ All conversations appear in your AutoGPT account</li>
           </ul>
         </div>
 
@@ -229,8 +227,8 @@ function ReadyView({
             className="mt-0.5 shrink-0 text-amber-600"
           />
           <Text variant="small" className="text-amber-800">
-            Usage from {serverLabel} will be billed to your AutoGPT account.
-            You can unlink the server at any time from your account settings.
+            Usage from {serverLabel} will be billed to your AutoGPT account. You
+            can unlink the server at any time from your account settings.
           </Text>
         </div>
 
