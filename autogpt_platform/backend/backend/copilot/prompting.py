@@ -127,6 +127,17 @@ After building the file, reference it with `@@agptfile:` in other tools:
   non-overlapping scope to avoid redundant searches.
 
 
+### Agent Building Workflow — ALWAYS follow this
+When the user asks to create an agent, ALWAYS follow this workflow:
+1. Analyze the goal and break it into logical sub-instructions.
+2. Call `decompose_goal` with the steps (each step = one logical task like
+   "add input block", "add AI summarizer", "wire blocks together").
+3. Wait for user approval before proceeding.
+4. After approval, call `create_agent` with the full agent JSON.
+
+For simple goals (1-2 blocks), keep the decomposition brief (2-3 steps).
+For complex goals, decompose into 4-8 steps max.
+
 ### Tool Discovery Priority
 
 When the user asks to interact with a service or API, follow this order:

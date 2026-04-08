@@ -36,6 +36,9 @@ class ResponseType(str, Enum):
     AGENT_BUILDER_VALIDATION_RESULT = "agent_builder_validation_result"
     AGENT_BUILDER_FIX_RESULT = "agent_builder_fix_result"
 
+    # Task decomposition (goal → sub-instructions)
+    TASK_DECOMPOSITION = "task_decomposition"
+
     # Block
     BLOCK_LIST = "block_list"
     BLOCK_DETAILS = "block_details"
@@ -688,3 +691,35 @@ class AgentsMovedToFolderResponse(ToolResponseBase):
     agent_names: list[str] = []
     folder_id: str | None = None
     count: int = 0
+
+
+# Task decomposition models
+
+
+class DecompositionStepModel(BaseModel):
+    """A single step in a decomposed agent-building plan."""
+
+    step_id: str = Field(description="Unique step identifier, e.g. 'step_1'")
+    description: str = Field(description="Human-readable step description")
+    action: str = Field(
+        description="Action type: 'add_block', 'connect_blocks', 'configure', etc."
+    )
+    block_name: str | None = Field(
+        default=None, description="Block being added, if applicable"
+    )
+    status: str = Field(
+        default="pending",
+        description="Step status: pending, in_progress, completed, failed",
+    )
+
+
+class TaskDecompositionResponse(ToolResponseBase):
+    """Response for decompose_goal tool — shows the plan to the user."""
+
+    type: ResponseType = ResponseType.TASK_DECOMPOSITION
+    goal: str = Field(description="The original user goal")
+    steps: list[DecompositionStepModel]
+    step_count: int
+    requires_approval: bool = True
+
+
