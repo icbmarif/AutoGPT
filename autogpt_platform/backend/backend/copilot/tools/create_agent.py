@@ -54,6 +54,16 @@ class CreateAgentTool(BaseTool):
                     "type": "string",
                     "description": "Folder ID to save into (default: root).",
                 },
+                "is_hidden": {
+                    "type": "boolean",
+                    "description": (
+                        "Hide from the user's library listing. "
+                        "Use for trigger agents — they appear under "
+                        "the parent agent's triggers (auto-derived "
+                        "from AgentExecutorBlock usage in the graph)."
+                    ),
+                    "default": False,
+                },
             },
             "required": ["agent_json"],
         }
@@ -80,11 +90,14 @@ class CreateAgentTool(BaseTool):
         save = kwargs.get("save", True)
         library_agent_ids = kwargs.get("library_agent_ids", [])
         folder_id: str | None = kwargs.get("folder_id")
+        is_hidden: bool = kwargs.get("is_hidden", False)
 
         nodes = agent_json.get("nodes", [])
         if not nodes:
             return ErrorResponse(
-                message="The agent JSON has no nodes. An agent needs at least one block.",
+                message=(
+                    "The agent JSON has no nodes. " "An agent needs at least one block."
+                ),
                 error="empty_agent",
                 session_id=session_id,
             )
@@ -109,4 +122,5 @@ class CreateAgentTool(BaseTool):
             default_name="Generated Agent",
             library_agents=library_agents,
             folder_id=folder_id,
+            is_hidden=is_hidden,
         )

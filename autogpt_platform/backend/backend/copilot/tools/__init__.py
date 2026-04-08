@@ -33,6 +33,7 @@ from .manage_folders import (
     MoveFolderTool,
     UpdateFolderTool,
 )
+from .manage_schedules import DeleteScheduleTool, ListSchedulesTool
 from .run_agent import RunAgentTool
 from .run_block import RunBlockTool
 from .run_mcp_tool import RunMCPToolTool
@@ -69,6 +70,9 @@ TOOL_REGISTRY: dict[str, BaseTool] = {
     "delete_folder": DeleteFolderTool(),
     "move_agents_to_folder": MoveAgentsToFolderTool(),
     "run_agent": RunAgentTool(),
+    # Schedule management
+    "list_schedules": ListSchedulesTool(),
+    "delete_schedule": DeleteScheduleTool(),
     "run_block": RunBlockTool(),
     "continue_run_block": ContinueRunBlockTool(),
     "run_mcp_tool": RunMCPToolTool(),

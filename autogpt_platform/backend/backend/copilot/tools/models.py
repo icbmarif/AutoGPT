@@ -80,6 +80,10 @@ class ResponseType(str, Enum):
     FEATURE_REQUEST_SEARCH = "feature_request_search"
     FEATURE_REQUEST_CREATED = "feature_request_created"
 
+    # Schedules
+    SCHEDULE_LIST = "schedule_list"
+    SCHEDULE_DELETED = "schedule_deleted"
+
 
 # Base response model
 class ToolResponseBase(BaseModel):
