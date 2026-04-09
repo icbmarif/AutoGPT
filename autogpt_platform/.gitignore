@@ -1,3 +1,10 @@
 *.ignore.*
 *.ign.*
 .application.logs
+
+# CoPilot bot service
+copilot-bot/node_modules/
+copilot-bot/dist/
+
+# Claude Code local settings
+.claude/
