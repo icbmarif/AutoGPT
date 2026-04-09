@@ -200,35 +200,42 @@ function ReadyView({
   platform: string | null;
   userEmail: string | null;
 }) {
-  const serverLabel =
-    serverName ?? (platform ? `this ${platform} server` : "your server");
   const platformLabel = platform ?? "your chat platform";
+  const isPersonal = !serverName;
+  const title = isPersonal
+    ? `Link your ${platformLabel} account`
+    : `Set up CoPilot for ${serverName}`;
+  const contextLabel = isPersonal
+    ? `your ${platformLabel} account`
+    : (serverName ?? `this ${platformLabel} group`);
 
   return (
-    <AuthCard
-      title={
-        serverName
-          ? `Set up CoPilot for ${serverName}`
-          : "Set up CoPilot for your server"
-      }
-    >
+    <AuthCard title={title}>
       <div className="flex w-full flex-col items-center gap-6">
         <div className="w-full rounded-xl bg-slate-50 p-5 text-left">
           <Text variant="body-medium" className="font-medium">
             What happens when you confirm:
           </Text>
-          <ul className="mt-3 space-y-2 text-sm text-muted-foreground">
-            <li>{serverLabel} will be connected to your AutoGPT account</li>
-            <li>Everyone in the server can chat with CoPilot immediately</li>
-            <li>Each person gets their own private conversation</li>
-            <li>All conversations appear in your AutoGPT account</li>
-          </ul>
+          {isPersonal ? (
+            <ul className="mt-3 space-y-2 text-sm text-muted-foreground">
+              <li>{contextLabel} will be linked to your AutoGPT account</li>
+              <li>You can use CoPilot directly from {platformLabel}</li>
+              <li>Your conversations appear in your AutoGPT account</li>
+            </ul>
+          ) : (
+            <ul className="mt-3 space-y-2 text-sm text-muted-foreground">
+              <li>{contextLabel} will be connected to your AutoGPT account</li>
+              <li>Everyone in the group can chat with CoPilot immediately</li>
+              <li>Each person gets their own private conversation</li>
+              <li>All conversations appear in your AutoGPT account</li>
+            </ul>
+          )}
         </div>
 
         <div className="w-full rounded-xl border border-slate-200 bg-slate-50 p-4">
           <Text variant="small" className="text-muted-foreground">
-            Usage from {serverLabel} will be billed to your AutoGPT account. You
-            can unlink the server at any time from your account settings.
+            Usage from {contextLabel} will be billed to your AutoGPT account.
+            You can unlink at any time from your account settings.
           </Text>
         </div>
 
