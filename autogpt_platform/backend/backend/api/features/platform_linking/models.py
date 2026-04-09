@@ -121,6 +121,13 @@ class LinkTokenStatusResponse(BaseModel):
     status: Literal["pending", "linked", "expired"]
 
 
+class LinkTokenInfoResponse(BaseModel):
+    """Non-sensitive display info for the frontend link page."""
+
+    platform: str
+    server_name: str | None
+
+
 class ResolveResponse(BaseModel):
     linked: bool
 

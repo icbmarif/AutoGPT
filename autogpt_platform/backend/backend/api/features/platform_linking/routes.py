@@ -31,6 +31,7 @@ from .models import (
     ConfirmLinkResponse,
     CreateLinkTokenRequest,
     DeleteLinkResponse,
+    LinkTokenInfoResponse,
     LinkTokenResponse,
     LinkTokenStatusResponse,
     PlatformLinkInfo,
@@ -155,6 +156,31 @@ async def get_link_token_status(
         return LinkTokenStatusResponse(status="expired")
 
     return LinkTokenStatusResponse(status="pending")
+
+
+@router.get(
+    "/tokens/{token}/info",
+    response_model=LinkTokenInfoResponse,
+    summary="Get display info for a link token (no auth required)",
+)
+async def get_link_token_info(token: TokenPath) -> LinkTokenInfoResponse:
+    """
+    Returns non-sensitive display info (platform, server name) so the frontend
+    can show context before the user confirms. No auth required — the token has
+    32 bytes of entropy and expires in 30 minutes.
+    """
+    link_token = await PlatformLinkToken.prisma().find_unique(where={"token": token})
+
+    if not link_token or link_token.usedAt is not None:
+        raise HTTPException(status_code=404, detail="Token not found.")
+
+    if link_token.expiresAt.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        raise HTTPException(status_code=410, detail="Token expired.")
+
+    return LinkTokenInfoResponse(
+        platform=link_token.platform,
+        server_name=link_token.serverName,
+    )
 
 
 @router.post(
