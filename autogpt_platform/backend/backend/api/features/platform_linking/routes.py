@@ -122,10 +122,12 @@ async def create_link_token(
         "PLATFORM_LINK_BASE_URL", "https://platform.agpt.co/link"
     )
 
+    # Include platform in URL so the frontend can show the right copy
+    # without needing a separate API call.
     return LinkTokenResponse(
         token=token,
         expires_at=expires_at,
-        link_url=f"{link_base_url}/{token}",
+        link_url=f"{link_base_url}/{token}?platform={platform}",
     )
 
 
