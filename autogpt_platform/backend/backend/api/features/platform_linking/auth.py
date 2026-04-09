@@ -1,11 +1,14 @@
 """Bot API key authentication for platform linking endpoints."""
 
 import hmac
+import logging
 import os
 
 from fastapi import HTTPException, Request
 
 from backend.util.settings import Settings
+
+logger = logging.getLogger(__name__)
 
 
 async def get_bot_api_key(request: Request) -> str | None:
@@ -28,7 +31,13 @@ def check_bot_api_key(api_key: str | None) -> None:
                 status_code=503,
                 detail="Bot API key not configured.",
             )
-        # Auth disabled (local dev) — allow without key
+        # Auth disabled (local dev) — allow without key, but warn so this
+        # is never silent in staging or misconfigured production deployments.
+        logger.warning(
+            "PLATFORM_BOT_API_KEY is not set and auth is disabled — "
+            "all bot-facing platform linking endpoints are unauthenticated. "
+            "Set PLATFORM_BOT_API_KEY in your environment for any non-local deployment."
+        )
         return
 
     if not api_key or not hmac.compare_digest(api_key, configured_key):
