@@ -77,6 +77,7 @@ ToolName = Literal[
     "create_feature_request",
     "create_folder",
     "customize_agent",
+    "decompose_goal",
     "delete_folder",
     "delete_workspace_file",
     "edit_agent",
