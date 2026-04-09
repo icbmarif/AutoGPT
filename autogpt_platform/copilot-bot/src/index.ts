@@ -48,7 +48,9 @@ async function main() {
   // Connect Discord Gateway if enabled
   if (cfg.discord) {
     await bot.initialize();
-    const discord = bot.adapters.discord;
+    // getAdapter() returns the initialized adapter instance with gateway methods;
+    // bot.adapters gives the raw config objects which don't have startGatewayListener.
+    const discord = (bot as any).getAdapter("discord");
 
     if (discord?.startGatewayListener) {
       const webhookUrl = `http://localhost:${PORT}/api/webhooks/discord`;

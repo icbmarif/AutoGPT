@@ -28,7 +28,7 @@ export async function GET(request: Request): Promise<Response> {
   const bot = await getBotInstance();
   await bot.initialize();
 
-  const discord = bot.adapters.discord;
+  const discord = (bot as any).getAdapter("discord");
   if (!discord) {
     return new Response("Discord adapter not configured", { status: 404 });
   }
