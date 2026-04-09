@@ -167,7 +167,7 @@ async function fetchTokenInfo(
 
 function LoadingView() {
   return (
-    <AuthCard title="Setting up CoPilot">
+    <AuthCard title="Setting up AutoPilot">
       <div className="flex flex-col items-center gap-4">
         <Spinner size={48} className="animate-spin text-primary" />
         <Text variant="body-medium" className="text-muted-foreground">
@@ -188,7 +188,7 @@ function NotAuthenticatedView({ token }: { token: string }) {
           variant="body-medium"
           className="text-center text-muted-foreground"
         >
-          Sign in to your AutoGPT account to set up CoPilot for your server.
+          Sign in to your AutoGPT account to set up AutoPilot for your server.
         </Text>
         <Button as="NextLink" href={loginUrl} className="w-full">
           Sign in
@@ -220,7 +220,7 @@ function ReadyView({
   const isPersonal = !serverName;
   const title = isPersonal
     ? `Link your ${platformLabel} account`
-    : `Set up CoPilot for ${serverName}`;
+    : `Set up AutoPilot for ${serverName}`;
   const contextLabel = isPersonal
     ? `your ${platformLabel} account`
     : (serverName ?? `this ${platformLabel} group`);
@@ -235,13 +235,13 @@ function ReadyView({
           {isPersonal ? (
             <ul className="mt-3 space-y-2 text-sm text-muted-foreground">
               <li>{contextLabel} will be linked to your AutoGPT account</li>
-              <li>You can use CoPilot directly from {platformLabel}</li>
+              <li>You can use AutoPilot directly from {platformLabel}</li>
               <li>Your conversations appear in your AutoGPT account</li>
             </ul>
           ) : (
             <ul className="mt-3 space-y-2 text-sm text-muted-foreground">
               <li>{contextLabel} will be connected to your AutoGPT account</li>
-              <li>Everyone in the group can chat with CoPilot immediately</li>
+              <li>Everyone in the group can chat with AutoPilot immediately</li>
               <li>Each person gets their own private conversation</li>
               <li>All conversations appear in your AutoGPT account</li>
             </ul>
@@ -283,7 +283,7 @@ function LinkingView() {
       <div className="flex flex-col items-center gap-4">
         <Spinner size={48} className="animate-spin text-primary" />
         <Text variant="body-medium" className="text-muted-foreground">
-          Setting up CoPilot for your server...
+          Setting up AutoPilot for your server...
         </Text>
       </div>
     </AuthCard>
@@ -300,7 +300,7 @@ function SuccessView({
   const label = serverName ?? `your ${platform} server`;
 
   return (
-    <AuthCard title="CoPilot is ready!">
+    <AuthCard title="AutoPilot is ready!">
       <div className="flex w-full flex-col items-center gap-6">
         <div className="flex h-16 w-16 items-center justify-center rounded-full bg-green-100">
           <CheckCircle size={40} weight="fill" className="text-green-600" />
@@ -311,7 +311,7 @@ function SuccessView({
         >
           <strong>{label}</strong> is now connected to your AutoGPT account.
           <br />
-          Everyone in the server can start using CoPilot right away.
+          Everyone in the server can start using AutoPilot right away.
         </Text>
         <Text variant="small" className="text-center text-muted-foreground">
           You can close this page and go back to your chat.
