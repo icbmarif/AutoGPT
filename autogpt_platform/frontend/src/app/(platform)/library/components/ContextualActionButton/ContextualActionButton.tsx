@@ -8,28 +8,23 @@ import {
   PlayIcon,
   ArrowCounterClockwiseIcon,
 } from "@phosphor-icons/react";
-import { useToast } from "@/components/molecules/Toast/use-toast";
+import { useRouter } from "next/navigation";
 import type { AgentStatus } from "../../types";
 
 interface Props {
   status: AgentStatus;
   agentID: string;
+  executionID?: string;
   className?: string;
 }
 
-/**
- * Renders the single most relevant action for an agent based on its status.
- *
- * | Status    | Action          | Behaviour (TODO: wire to real endpoints) |
- * |-----------|-----------------|------------------------------------------|
- * | error     | View error      | Opens error detail / run log             |
- * | listening | Reconnect       | Opens reconnection flow                  |
- * | running   | Watch live      | Opens real-time execution view           |
- * | idle      | Run now         | Triggers immediate new run               |
- * | scheduled | Run now         | Triggers immediate new run               |
- */
-export function ContextualActionButton({ status, agentID, className }: Props) {
-  const { toast } = useToast();
+export function ContextualActionButton({
+  status,
+  agentID,
+  executionID,
+  className,
+}: Props) {
+  const router = useRouter();
 
   const config = ACTION_CONFIG[status];
   if (!config) return null;
@@ -39,11 +34,11 @@ export function ContextualActionButton({ status, agentID, className }: Props) {
   function handleClick(e: React.MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
-    // TODO: Replace with real API calls
-    toast({
-      title: config.label,
-      description: `${config.label} triggered for agent ${agentID.slice(0, 8)}…`,
-    });
+
+    const params = new URLSearchParams();
+    if (executionID) params.set("activeItem", executionID);
+    const query = params.toString();
+    router.push(`/library/agents/${agentID}${query ? `?${query}` : ""}`);
   }
 
   return (

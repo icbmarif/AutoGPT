@@ -58,6 +58,7 @@ export default function LibraryPage() {
           statusFilter={statusFilter}
           onStatusFilterChange={setStatusFilter}
           fleetSummary={isAgentBriefingEnabled ? fleetSummary : undefined}
+          briefingAgents={isAgentBriefingEnabled ? agents : undefined}
         />
       </main>
     </FavoriteAnimationProvider>

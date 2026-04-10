@@ -1,6 +1,7 @@
 "use client";
 
 import { LibraryAgentSort } from "@/app/api/__generated__/models/libraryAgentSort";
+import type { LibraryAgent } from "@/app/api/__generated__/models/libraryAgent";
 import { LoadingSpinner } from "@/components/atoms/LoadingSpinner/LoadingSpinner";
 import { InfiniteScroll } from "@/components/contextual/InfiniteScroll/InfiniteScroll";
 import { LibraryAgentCard } from "../LibraryAgentCard/LibraryAgentCard";
@@ -75,6 +76,7 @@ interface Props {
   statusFilter?: AgentStatusFilter;
   onStatusFilterChange?: (filter: AgentStatusFilter) => void;
   fleetSummary?: FleetSummary;
+  briefingAgents?: LibraryAgent[];
 }
 
 export function LibraryAgentList({
@@ -89,6 +91,7 @@ export function LibraryAgentList({
   statusFilter = "all",
   onStatusFilterChange,
   fleetSummary,
+  briefingAgents,
 }: Props) {
   const isAgentBriefingEnabled = useGetFlag(Flag.AGENT_BRIEFING);
   const shouldReduceMotion = useReducedMotion();
@@ -105,7 +108,7 @@ export function LibraryAgentList({
     isFavoritesTab,
     agentLoading,
     displayedCount,
-    allAgentIDs,
+    allAgents,
     favoritesCount,
     agents,
     hasNextPage,
@@ -135,9 +138,7 @@ export function LibraryAgentList({
         <div className="mb-4">
           <AgentBriefingPanel
             summary={fleetSummary}
-            agentIDs={allAgentIDs}
-            onFilterChange={onStatusFilterChange}
-            activeFilter={statusFilter}
+            agents={briefingAgents ?? allAgents}
           />
         </div>
       )}

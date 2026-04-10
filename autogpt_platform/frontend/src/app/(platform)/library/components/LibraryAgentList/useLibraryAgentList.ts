@@ -207,9 +207,9 @@ export function useLibraryAgentList({
 
   const showFolders = !isFavoritesTab;
 
-  // All loaded agent IDs (unfiltered) — used by AgentBriefingPanel so the
-  // sitrep always covers the full fleet, not just the currently filtered view.
-  const allAgentIDs = agents.map((a) => a.id);
+  // Unfiltered agent list — used by AgentBriefingPanel so the sitrep
+  // always covers the full fleet, not just the currently filtered view.
+  const allAgents = agents;
 
   // Client-side filter by status using mock data until the real API supports it.
   const filteredAgents = filterAgentsByStatus(agents, statusFilter);
@@ -263,7 +263,7 @@ export function useLibraryAgentList({
     agentCount,
     allAgentsCount,
     displayedCount,
-    allAgentIDs,
+    allAgents,
     favoritesCount: favoriteAgentsData.agentCount,
     agents: filteredAgents,
     hasNextPage: agentsHasNextPage && !filteredExhausted,

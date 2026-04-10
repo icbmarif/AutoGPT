@@ -19,6 +19,7 @@ export interface SitrepItemData {
   id: string;
   agentID: string;
   agentName: string;
+  executionID?: string;
   priority: SitrepPriority;
   message: string;
   status: AgentStatus;
@@ -80,7 +81,7 @@ export function SitrepItem({ item, onAskAutoPilot }: Props) {
       </div>
 
       <div className="min-w-0 flex-1">
-        <Text variant="small-medium" className="text-zinc-900">
+        <Text variant="body-medium" className="text-zinc-900">
           {item.agentName}
         </Text>
         <Text variant="small" className="mt-0.5 text-zinc-500">
@@ -89,7 +90,11 @@ export function SitrepItem({ item, onAskAutoPilot }: Props) {
       </div>
 
       <div className="flex flex-shrink-0 items-center gap-1.5 opacity-0 transition-opacity group-hover:opacity-100">
-        <ContextualActionButton status={item.status} agentID={item.agentID} />
+        <ContextualActionButton
+          status={item.status}
+          agentID={item.agentID}
+          executionID={item.executionID}
+        />
         <Button
           variant="ghost"
           size="small"

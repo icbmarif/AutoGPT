@@ -1,96 +1,99 @@
 "use client";
 
 import { Text } from "@/components/atoms/Text/Text";
-import {
-  CurrencyDollarIcon,
-  PlayCircleIcon,
-  WarningCircleIcon,
-  EarIcon,
-  ClockIcon,
-  PauseCircleIcon,
-} from "@phosphor-icons/react";
+import { Emoji } from "@/components/atoms/Emoji/Emoji";
 import { cn } from "@/lib/utils";
 import type { FleetSummary, AgentStatusFilter } from "../../types";
 
 interface Props {
   summary: FleetSummary;
-  activeFilter: AgentStatusFilter;
-  onFilterChange?: (filter: AgentStatusFilter) => void;
+  activeTab: AgentStatusFilter;
+  onTabChange: (tab: AgentStatusFilter) => void;
 }
 
-export function StatsGrid({ summary, activeFilter, onFilterChange }: Props) {
-  const tiles = [
-    {
-      label: "Spend this month",
-      value: `$${summary.monthlySpend.toLocaleString()}`,
-      filter: "all" as AgentStatusFilter,
-      icon: CurrencyDollarIcon,
-      color: "text-zinc-700",
-    },
-    {
-      label: "Running now",
-      value: summary.running,
-      filter: "running" as AgentStatusFilter,
-      icon: PlayCircleIcon,
-      color: "text-blue-600",
-    },
-    {
-      label: "Needs attention",
-      value: summary.error,
-      filter: "attention" as AgentStatusFilter,
-      icon: WarningCircleIcon,
-      color: "text-red-500",
-    },
-    {
-      label: "Listening",
-      value: summary.listening,
-      filter: "listening" as AgentStatusFilter,
-      icon: EarIcon,
-      color: "text-purple-500",
-    },
-    {
-      label: "Scheduled",
-      value: summary.scheduled,
-      filter: "scheduled" as AgentStatusFilter,
-      icon: ClockIcon,
-      color: "text-yellow-600",
-    },
-    {
-      label: "Idle",
-      value: summary.idle,
-      filter: "idle" as AgentStatusFilter,
-      icon: PauseCircleIcon,
-      color: "text-zinc-400",
-    },
-  ];
+const TILES: {
+  label: string;
+  key: keyof FleetSummary;
+  format?: (v: number) => string;
+  filter: AgentStatusFilter;
+  emoji: string;
+  color: string;
+}[] = [
+  {
+    label: "Spent this month",
+    key: "monthlySpend",
+    format: (v) => `$${v.toLocaleString()}`,
+    filter: "all",
+    emoji: "💵",
+    color: "text-zinc-700",
+  },
+  {
+    label: "Running now",
+    key: "running",
+    filter: "running",
+    emoji: "🏃",
+    color: "text-blue-600",
+  },
+  {
+    label: "Needs attention",
+    key: "error",
+    filter: "attention",
+    emoji: "⚠️",
+    color: "text-red-500",
+  },
+  {
+    label: "Listening",
+    key: "listening",
+    filter: "listening",
+    emoji: "👂",
+    color: "text-purple-500",
+  },
+  {
+    label: "Scheduled",
+    key: "scheduled",
+    filter: "scheduled",
+    emoji: "📅",
+    color: "text-yellow-600",
+  },
+  {
+    label: "Idle",
+    key: "idle",
+    filter: "idle",
+    emoji: "💤",
+    color: "text-zinc-400",
+  },
+];
 
+export function StatsGrid({ summary, activeTab, onTabChange }: Props) {
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-      {tiles.map((tile) => {
-        const Icon = tile.icon;
-        const isActive = activeFilter === tile.filter;
+      {TILES.map((tile) => {
+        const rawValue = summary[tile.key];
+        const value = tile.format ? tile.format(rawValue) : rawValue;
+        const isActive = activeTab === tile.filter;
+        const isEmpty = rawValue === 0 && tile.filter !== "all";
 
         return (
           <button
             key={tile.label}
             type="button"
-            onClick={() => onFilterChange?.(tile.filter)}
+            disabled={isEmpty}
+            onClick={() => onTabChange(tile.filter)}
             className={cn(
-              "flex flex-col gap-1 rounded-medium border p-3 text-left transition-all hover:shadow-sm",
+              "flex flex-col gap-1 rounded-medium border p-3 text-left transition-all",
+              isEmpty ? "cursor-default" : "hover:shadow-sm",
               isActive
                 ? "border-zinc-900 bg-zinc-50"
                 : "border-zinc-100 bg-white",
             )}
           >
             <div className="flex items-center gap-1.5">
-              <Icon size={14} className={tile.color} />
-              <Text variant="small" className="text-zinc-500">
+              <Emoji text={tile.emoji} size={14} />
+              <Text variant="body" className="text-zinc-600">
                 {tile.label}
               </Text>
             </div>
-            <Text variant="h4" className={tile.color}>
-              {tile.value}
-            </Text>
+            <Text variant="h4">{value}</Text>
           </button>
         );
       })}

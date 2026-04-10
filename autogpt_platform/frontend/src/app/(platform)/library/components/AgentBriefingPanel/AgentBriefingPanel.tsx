@@ -3,47 +3,26 @@
 import { Text } from "@/components/atoms/Text/Text";
 import { Button } from "@/components/atoms/Button/Button";
 import { CaretUpIcon, CaretDownIcon } from "@phosphor-icons/react";
+import type { LibraryAgent } from "@/app/api/__generated__/models/libraryAgent";
 import { useState } from "react";
 import type { FleetSummary, AgentStatusFilter } from "../../types";
-import { SitrepList } from "../SitrepItem/SitrepList";
+import { BriefingTabContent } from "./BriefingTabContent";
 import { StatsGrid } from "./StatsGrid";
 
 interface Props {
   summary: FleetSummary;
-  agentIDs: string[];
-  onFilterChange?: (filter: AgentStatusFilter) => void;
-  activeFilter?: AgentStatusFilter;
+  agents: LibraryAgent[];
 }
 
-export function AgentBriefingPanel({
-  summary,
-  agentIDs,
-  onFilterChange,
-  activeFilter = "all",
-}: Props) {
+export function AgentBriefingPanel({ summary, agents }: Props) {
   const [isCollapsed, setIsCollapsed] = useState(false);
-
-  const totalAttention = summary.error;
-
-  const headerSummary = [
-    summary.running > 0 && `${summary.running} running`,
-    totalAttention > 0 && `${totalAttention} need attention`,
-    summary.listening > 0 && `${summary.listening} listening`,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  const defaultTab: AgentStatusFilter = summary.running > 0 ? "running" : "all";
+  const [activeTab, setActiveTab] = useState<AgentStatusFilter>(defaultTab);
 
   return (
     <div className="rounded-large border border-zinc-100 bg-white p-5 shadow-sm">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <Text variant="h5">Agent Briefing</Text>
-          {headerSummary && (
-            <Text variant="small" className="text-zinc-500">
-              {headerSummary}
-            </Text>
-          )}
-        </div>
+        <Text variant="h5">Agent Briefing</Text>
         <Button
           variant="ghost"
           size="icon"
@@ -62,10 +41,10 @@ export function AgentBriefingPanel({
         <div className="mt-4 space-y-5">
           <StatsGrid
             summary={summary}
-            activeFilter={activeFilter}
-            onFilterChange={onFilterChange}
+            activeTab={activeTab}
+            onTabChange={setActiveTab}
           />
-          <SitrepList agentIDs={agentIDs} />
+          <BriefingTabContent activeTab={activeTab} agents={agents} />
         </div>
       )}
     </div>
