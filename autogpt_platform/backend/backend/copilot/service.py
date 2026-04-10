@@ -172,6 +172,9 @@ async def inject_user_context(
     if f"<{USER_CONTEXT_TAG}>" in message:
         return message
 
+    if understanding is None:
+        return None
+
     user_ctx = format_understanding_for_prompt(understanding)
     prefixed = f"<{USER_CONTEXT_TAG}>\n{user_ctx}\n</{USER_CONTEXT_TAG}>\n\n{message}"
     for idx, session_msg in enumerate(session_messages):
