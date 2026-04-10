@@ -679,6 +679,30 @@ class ExecutionProcessor:
         execution_stats.walltime = timing_info.wall_time
         execution_stats.cputime = timing_info.cpu_time
 
+        # Charge extra iterations for blocks that opt into per-LLM-call
+        # billing (e.g. OrchestratorBlock in agent mode). The first call
+        # is already covered by _charge_usage(); each additional LLM call
+        # costs another base_cost. Skipped for dry runs and failed runs.
+        if (
+            status == ExecutionStatus.COMPLETED
+            and node.block.charge_per_llm_call
+            and execution_stats.llm_call_count > 1
+            and not node_exec.execution_context.dry_run
+        ):
+            extra_iterations = execution_stats.llm_call_count - 1
+            try:
+                extra_cost = await asyncio.to_thread(
+                    self.charge_extra_iterations,
+                    node_exec,
+                    extra_iterations,
+                )
+                if extra_cost > 0:
+                    execution_stats.extra_cost += extra_cost
+            except Exception as e:
+                log_metadata.warning(
+                    f"Failed to charge extra iterations for " f"{node.block.name}: {e}"
+                )
+
         graph_stats, graph_stats_lock = graph_stats_pair
         with graph_stats_lock:
             graph_stats.node_count += 1 + execution_stats.extra_steps
@@ -993,6 +1017,68 @@ class ExecutionProcessor:
             total_cost += cost
 
         return total_cost, remaining_balance
+
+    def charge_node_usage(
+        self,
+        node_exec: NodeExecutionEntry,
+    ) -> tuple[int, int]:
+        """Charge a single node execution to the user.
+
+        Public wrapper around :meth:`_charge_usage` for blocks (e.g. the
+        OrchestratorBlock) that spawn nested node executions outside the
+        main queue and therefore need to charge them explicitly.
+        """
+        return self._charge_usage(
+            node_exec=node_exec,
+            execution_count=increment_execution_count(node_exec.user_id),
+        )
+
+    def charge_extra_iterations(
+        self,
+        node_exec: NodeExecutionEntry,
+        extra_iterations: int,
+    ) -> int:
+        """Charge a block extra iterations beyond the initial run.
+
+        Used by agent-mode blocks (e.g. OrchestratorBlock) that make
+        multiple LLM calls within a single node execution. The first
+        iteration is already charged by :meth:`_charge_usage`; this
+        method charges *extra_iterations* additional copies of the
+        block's base cost.
+        """
+        if extra_iterations <= 0:
+            return 0
+        db_client = get_db_client()
+        block = get_block(node_exec.block_id)
+        if not block:
+            return 0
+        cost, matching_filter = block_usage_cost(
+            block=block, input_data=node_exec.inputs
+        )
+        if cost <= 0:
+            return 0
+        total_extra_cost = cost * extra_iterations
+        db_client.spend_credits(
+            user_id=node_exec.user_id,
+            cost=total_extra_cost,
+            metadata=UsageTransactionMetadata(
+                graph_exec_id=node_exec.graph_exec_id,
+                graph_id=node_exec.graph_id,
+                node_exec_id=node_exec.node_exec_id,
+                node_id=node_exec.node_id,
+                block_id=node_exec.block_id,
+                block=block.name,
+                input={
+                    **matching_filter,
+                    "extra_iterations": extra_iterations,
+                },
+                reason=(
+                    f"Extra agent-mode iterations for {block.name} "
+                    f"({extra_iterations} additional LLM calls)"
+                ),
+            ),
+        )
+        return total_extra_cost
 
     @time_measured
     def _on_graph_execution(

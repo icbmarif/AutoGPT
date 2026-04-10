@@ -369,6 +369,11 @@ class OrchestratorBlock(Block):
     single-shot and iterative agent mode execution.
     """
 
+    # In agent mode the block makes one LLM call per iteration. The executor
+    # uses this flag to charge `cost * (llm_call_count - 1)` extra credits
+    # after the block completes; the first call is covered by _charge_usage().
+    charge_per_llm_call = True
+
     # MCP server name used by the Claude Code SDK execution mode.  Keep in sync
     # with _create_graph_mcp_server and the MCP_PREFIX derivation in _execute_tools_sdk_mode.
     _SDK_MCP_SERVER_NAME = "graph_tools"
@@ -1101,6 +1106,18 @@ class OrchestratorBlock(Block):
                 execution_processor.execution_stats,
                 execution_processor.execution_stats_lock,
             )
+
+            # Charge user credits for the tool execution. Tools spawned by the
+            # orchestrator bypass the main execution queue (where _charge_usage
+            # is called), so we must charge here to avoid free tool execution.
+            # Skipped for dry runs and when block has no cost configured.
+            if not execution_params.execution_context.dry_run:
+                tool_cost, _ = await asyncio.to_thread(
+                    execution_processor.charge_node_usage,
+                    node_exec_entry,
+                )
+                if tool_cost > 0:
+                    self.merge_stats(NodeExecutionStats(extra_cost=tool_cost))
 
             # Create a completed future for the task tracking system
             node_exec_future = Future()
