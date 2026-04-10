@@ -432,7 +432,7 @@ class UserCreditBase(ABC):
             current_balance, _ = await self._get_credits(user_id)
             if current_balance >= ceiling_balance:
                 raise ValueError(
-                    f"You already have enough balance of ${current_balance/100}, top-up is not required when you already have at least ${ceiling_balance/100}"
+                    f"You already have enough balance of ${current_balance / 100}, top-up is not required when you already have at least ${ceiling_balance / 100}"
                 )
 
         # Single unified atomic operation for all transaction types using UserBalance
@@ -571,7 +571,7 @@ class UserCreditBase(ABC):
         if amount < 0 and fail_insufficient_credits:
             current_balance, _ = await self._get_credits(user_id)
             raise InsufficientBalanceError(
-                message=f"Insufficient balance of ${current_balance/100}, where this will cost ${abs(amount)/100}",
+                message=f"Insufficient balance of ${current_balance / 100}, where this will cost ${abs(amount) / 100}",
                 user_id=user_id,
                 balance=current_balance,
                 amount=amount,
@@ -582,7 +582,6 @@ class UserCreditBase(ABC):
 
 
 class UserCredit(UserCreditBase):
-
     async def _send_refund_notification(
         self,
         notification_request: RefundRequestData,
@@ -734,7 +733,7 @@ class UserCredit(UserCreditBase):
         )
         if request.amount <= 0 or request.amount > transaction.amount:
             raise AssertionError(
-                f"Invalid amount to deduct ${request.amount/100} from ${transaction.amount/100} top-up"
+                f"Invalid amount to deduct ${request.amount / 100} from ${transaction.amount / 100} top-up"
             )
 
         balance, _ = await self._add_transaction(
@@ -788,12 +787,12 @@ class UserCredit(UserCreditBase):
 
         # If the user has enough balance, just let them win the dispute.
         if balance - amount >= settings.config.refund_credit_tolerance_threshold:
-            logger.warning(f"Accepting dispute from {user_id} for ${amount/100}")
+            logger.warning(f"Accepting dispute from {user_id} for ${amount / 100}")
             dispute.close()
             return
 
         logger.warning(
-            f"Adding extra info for dispute from {user_id} for ${amount/100}"
+            f"Adding extra info for dispute from {user_id} for ${amount / 100}"
         )
         # Retrieve recent transaction history to support our evidence.
         # This provides a concise timeline that shows service usage and proper credit application.
@@ -1266,11 +1265,22 @@ async def set_subscription_tier(user_id: str, tier: SubscriptionTier) -> None:
 
 
 async def cancel_stripe_subscription(user_id: str) -> None:
-    """Cancel all active Stripe subscriptions for a user (called on downgrade to FREE)."""
+    """Cancel all active Stripe subscriptions for a user (called on downgrade to FREE).
+
+    Raises stripe.StripeError if any cancellation fails, so the caller can avoid
+    updating the DB tier when Stripe is inconsistent.
+    """
     customer_id = await get_stripe_customer_id(user_id)
-    subscriptions = stripe.Subscription.list(
-        customer=customer_id, status="active", limit=10
-    )
+    try:
+        subscriptions = stripe.Subscription.list(
+            customer=customer_id, status="active", limit=10
+        )
+    except stripe.StripeError:
+        logger.warning(
+            "cancel_stripe_subscription: failed to list subscriptions for user %s",
+            user_id,
+        )
+        raise
     for sub in subscriptions.auto_paging_iter():
         try:
             stripe.Subscription.cancel(sub["id"])
@@ -1280,6 +1290,7 @@ async def cancel_stripe_subscription(user_id: str) -> None:
                 sub["id"],
                 user_id,
             )
+            raise
 
 
 async def get_auto_top_up(user_id: str) -> AutoTopUpConfig:

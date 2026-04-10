@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 import fastapi
 import fastapi.testclient
 import pytest_mock
+import stripe
 from autogpt_libs.auth.jwt_utils import get_jwt_payload
 from prisma.enums import SubscriptionTier
 
@@ -290,5 +291,38 @@ def test_update_subscription_tier_free_with_payment_cancels_stripe(
 
         assert response.status_code == 200
         mock_cancel.assert_awaited_once()
+    finally:
+        teardown_auth(app)
+
+
+def test_update_subscription_tier_free_cancel_failure_returns_502(
+    mocker: pytest_mock.MockFixture,
+) -> None:
+    """Downgrading to FREE returns 502 if Stripe cancellation fails."""
+    setup_auth(app)
+    try:
+        mock_user = Mock()
+        mock_user.subscription_tier = SubscriptionTier.PRO
+
+        async def mock_feature_enabled(*args, **kwargs):
+            return True
+
+        mocker.patch(
+            "backend.api.features.v1.cancel_stripe_subscription",
+            side_effect=stripe.StripeError("network error"),
+        )
+        mocker.patch(
+            "backend.api.features.v1.get_user_by_id",
+            new_callable=AsyncMock,
+            return_value=mock_user,
+        )
+        mocker.patch(
+            "backend.api.features.v1.is_feature_enabled",
+            side_effect=mock_feature_enabled,
+        )
+
+        response = client.post("/credits/subscription", json={"tier": "FREE"})
+
+        assert response.status_code == 502
     finally:
         teardown_auth(app)

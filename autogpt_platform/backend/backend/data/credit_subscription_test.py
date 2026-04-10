@@ -5,6 +5,7 @@ Tests for Stripe-based subscription tier billing.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import stripe
 from prisma.enums import SubscriptionTier
 from prisma.models import User
 
@@ -160,6 +161,24 @@ async def test_cancel_stripe_subscription_no_active():
 
 
 @pytest.mark.asyncio
+async def test_cancel_stripe_subscription_raises_on_list_failure():
+    """stripe.Subscription.list() failure propagates so DB tier is not updated."""
+    with (
+        patch(
+            "backend.data.credit.get_stripe_customer_id",
+            new_callable=AsyncMock,
+            return_value="cus_123",
+        ),
+        patch(
+            "backend.data.credit.stripe.Subscription.list",
+            side_effect=stripe.StripeError("network error"),
+        ),
+    ):
+        with pytest.raises(stripe.StripeError):
+            await cancel_stripe_subscription("user-1")
+
+
+@pytest.mark.asyncio
 async def test_create_subscription_checkout_returns_url():
     mock_session = MagicMock()
     mock_session.url = "https://checkout.stripe.com/pay/cs_test_abc123"
@@ -174,7 +193,10 @@ async def test_create_subscription_checkout_returns_url():
             new_callable=AsyncMock,
             return_value="cus_123",
         ),
-        patch("stripe.checkout.Session.create", return_value=mock_session),
+        patch(
+            "backend.data.credit.stripe.checkout.Session.create",
+            return_value=mock_session,
+        ),
     ):
         url = await create_subscription_checkout(
             user_id="user-1",
@@ -333,8 +355,8 @@ async def test_get_subscription_price_id_empty_flag_returns_none():
 
 
 @pytest.mark.asyncio
-async def test_cancel_stripe_subscription_handles_stripe_error():
-    """Stripe errors during cancellation should be logged, not raised."""
+async def test_cancel_stripe_subscription_raises_on_cancel_error():
+    """Stripe errors during cancellation are re-raised so the DB tier is not updated."""
     import stripe as stripe_mod
 
     mock_sub = {"id": "sub_abc123"}
@@ -356,5 +378,5 @@ async def test_cancel_stripe_subscription_handles_stripe_error():
             side_effect=stripe_mod.StripeError("network error"),
         ),
     ):
-        # Should not raise — errors are logged as warnings
-        await cancel_stripe_subscription("user-1")
+        with pytest.raises(stripe_mod.StripeError):
+            await cancel_stripe_subscription("user-1")

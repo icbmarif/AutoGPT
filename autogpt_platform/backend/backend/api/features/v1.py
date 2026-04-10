@@ -769,7 +769,13 @@ async def update_subscription_tier(
     # Downgrade to FREE: cancel active Stripe subscription, then update the DB tier.
     if tier == SubscriptionTier.FREE:
         if payment_enabled:
-            await cancel_stripe_subscription(user_id)
+            try:
+                await cancel_stripe_subscription(user_id)
+            except stripe.StripeError as e:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Failed to cancel Stripe subscription: {e}",
+                )
         await set_subscription_tier(user_id, tier)
         return SubscriptionCheckoutResponse(url="")
 
