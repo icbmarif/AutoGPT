@@ -271,9 +271,7 @@ class TestInjectUserContext:
         from backend.copilot.service import inject_user_context
 
         understanding = MagicMock()
-        already_prefixed = (
-            "<user_context>\nold ctx\n</user_context>\n\nhello again"
-        )
+        already_prefixed = "<user_context>\nold ctx\n</user_context>\n\nhello again"
         msg = ChatMessage(role="user", content=already_prefixed, sequence=0)
 
         mock_db = MagicMock()
