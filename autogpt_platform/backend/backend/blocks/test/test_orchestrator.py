@@ -923,10 +923,10 @@ async def test_orchestrator_agent_mode():
             return_value=mock_node_stats
         )
         # Mock charge_node_usage (called after successful tool execution).
-        # Returns (cost, remaining_balance). Synchronous because it's called
-        # via asyncio.to_thread. Use a non-zero cost so the merge_stats
-        # branch is actually exercised, and assert it's called below.
-        mock_execution_processor.charge_node_usage = MagicMock(return_value=(10, 990))
+        # Returns (cost, remaining_balance). Must be AsyncMock because it is
+        # an async method and is directly awaited in _execute_single_tool_with_manager.
+        # Use a non-zero cost so the merge_stats branch is exercised.
+        mock_execution_processor.charge_node_usage = AsyncMock(return_value=(10, 990))
 
         # Mock the get_execution_outputs_by_node_exec_id method
         mock_db_client.get_execution_outputs_by_node_exec_id.return_value = {
