@@ -163,8 +163,11 @@ class TestInjectUserContext:
         assert called_sequence == 7
 
     @pytest.mark.asyncio
-    async def test_falls_back_to_idx_when_sequence_is_none(self):
-        """When session_msg.sequence is None (cache-loaded), list index is used as fallback."""
+    async def test_skips_db_write_and_warns_when_sequence_is_none(self):
+        """When session_msg.sequence is None, the DB update is skipped and a warning is logged.
+
+        In-memory injection still happens so the current request is unaffected.
+        """
         from backend.copilot.model import ChatMessage
         from backend.copilot.service import inject_user_context
 
@@ -180,15 +183,13 @@ class TestInjectUserContext:
         ), patch(
             "backend.copilot.service.format_understanding_for_prompt",
             return_value="biz ctx",
-        ):
+        ), patch("backend.copilot.service.logger") as mock_logger:
             result = await inject_user_context(understanding, "hello", "sess-1", [msg])
 
         assert result is not None
-        mock_db.update_message_content_by_sequence.assert_awaited_once()
-        _, called_sequence, _ = (
-            mock_db.update_message_content_by_sequence.call_args.args
-        )
-        assert called_sequence == 0
+        assert "<user_context>" in result
+        mock_db.update_message_content_by_sequence.assert_not_awaited()
+        mock_logger.warning.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_returns_none_when_no_user_message(self):
