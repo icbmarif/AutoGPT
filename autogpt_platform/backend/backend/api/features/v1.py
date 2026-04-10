@@ -700,8 +700,33 @@ class SubscriptionCheckoutResponse(BaseModel):
 
 class SubscriptionStatusResponse(BaseModel):
     tier: str
-    monthly_cost: int
-    tier_costs: dict[str, int]
+    monthly_cost: int  # amount in cents (Stripe convention)
+    tier_costs: dict[str, int]  # tier name -> amount in cents
+
+
+def _validate_checkout_redirect_url(url: str) -> bool:
+    """Return True if `url` matches the configured frontend origin.
+
+    Prevents open-redirect: attackers must not be able to supply arbitrary
+    success_url/cancel_url that Stripe will redirect users to after checkout.
+    """
+    from urllib.parse import urlparse
+
+    allowed = settings.config.frontend_base_url or settings.config.platform_base_url
+    if not allowed:
+        # No configured origin — refuse to validate rather than allow arbitrary URLs.
+        return False
+    try:
+        parsed = urlparse(url)
+        allowed_parsed = urlparse(allowed)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    return (
+        parsed.scheme == allowed_parsed.scheme
+        and parsed.netloc == allowed_parsed.netloc
+    )
 
 
 @v1_router.get(
@@ -772,9 +797,20 @@ async def update_subscription_tier(
             try:
                 await cancel_stripe_subscription(user_id)
             except stripe.StripeError as e:
+                # Log full Stripe error server-side but return a generic message
+                # to the client — raw Stripe errors can leak customer/sub IDs and
+                # infrastructure config details.
+                logger.exception(
+                    "Stripe error cancelling subscription for user %s: %s",
+                    user_id,
+                    e,
+                )
                 raise HTTPException(
                     status_code=502,
-                    detail=f"Failed to cancel Stripe subscription: {e}",
+                    detail=(
+                        "Unable to cancel your subscription right now. "
+                        "Please try again or contact support."
+                    ),
                 )
         await set_subscription_tier(user_id, tier)
         return SubscriptionCheckoutResponse(url="")
@@ -790,6 +826,16 @@ async def update_subscription_tier(
             status_code=422,
             detail="success_url and cancel_url are required for paid tier upgrades",
         )
+    # Open-redirect protection: both URLs must point to the configured frontend
+    # origin, otherwise an attacker could use our Stripe integration as a
+    # redirector to arbitrary phishing sites.
+    if not _validate_checkout_redirect_url(
+        request.success_url
+    ) or not _validate_checkout_redirect_url(request.cancel_url):
+        raise HTTPException(
+            status_code=422,
+            detail="success_url and cancel_url must match the platform frontend origin",
+        )
     try:
         url = await create_subscription_checkout(
             user_id=user_id,
@@ -797,8 +843,19 @@ async def update_subscription_tier(
             success_url=request.success_url,
             cancel_url=request.cancel_url,
         )
-    except (ValueError, stripe.StripeError) as e:
+    except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    except stripe.StripeError as e:
+        logger.exception(
+            "Stripe error creating checkout session for user %s: %s", user_id, e
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Unable to start checkout right now. "
+                "Please try again or contact support."
+            ),
+        )
 
     return SubscriptionCheckoutResponse(url=url)
 
