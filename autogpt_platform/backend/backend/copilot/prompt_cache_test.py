@@ -143,10 +143,12 @@ class TestInjectUserContext:
 
         msg = ChatMessage(role="user", content="hello", sequence=7)
 
+        mock_db = MagicMock()
+        mock_db.update_message_content_by_sequence = AsyncMock(return_value=True)
         with patch(
-            "backend.copilot.service.update_message_content_by_sequence",
-            new=AsyncMock(return_value=True),
-        ) as mock_update, patch(
+            "backend.copilot.service.chat_db",
+            return_value=mock_db,
+        ), patch(
             "backend.copilot.service.format_understanding_for_prompt",
             return_value="biz ctx",
         ):
@@ -154,8 +156,10 @@ class TestInjectUserContext:
 
         assert result is not None
         assert "<user_context>" in result
-        mock_update.assert_awaited_once()
-        _, called_sequence, _ = mock_update.call_args.args
+        mock_db.update_message_content_by_sequence.assert_awaited_once()
+        _, called_sequence, _ = (
+            mock_db.update_message_content_by_sequence.call_args.args
+        )
         assert called_sequence == 7
 
     @pytest.mark.asyncio
@@ -168,18 +172,22 @@ class TestInjectUserContext:
 
         msg = ChatMessage(role="user", content="hello", sequence=None)
 
+        mock_db = MagicMock()
+        mock_db.update_message_content_by_sequence = AsyncMock(return_value=True)
         with patch(
-            "backend.copilot.service.update_message_content_by_sequence",
-            new=AsyncMock(return_value=True),
-        ) as mock_update, patch(
+            "backend.copilot.service.chat_db",
+            return_value=mock_db,
+        ), patch(
             "backend.copilot.service.format_understanding_for_prompt",
             return_value="biz ctx",
         ):
             result = await inject_user_context(understanding, "hello", "sess-1", [msg])
 
         assert result is not None
-        mock_update.assert_awaited_once()
-        _, called_sequence, _ = mock_update.call_args.args
+        mock_db.update_message_content_by_sequence.assert_awaited_once()
+        _, called_sequence, _ = (
+            mock_db.update_message_content_by_sequence.call_args.args
+        )
         assert called_sequence == 0
 
     @pytest.mark.asyncio
@@ -192,17 +200,19 @@ class TestInjectUserContext:
 
         msgs = [ChatMessage(role="assistant", content="hi")]
 
+        mock_db = MagicMock()
+        mock_db.update_message_content_by_sequence = AsyncMock(return_value=True)
         with patch(
-            "backend.copilot.service.update_message_content_by_sequence",
-            new=AsyncMock(return_value=True),
-        ) as mock_update, patch(
+            "backend.copilot.service.chat_db",
+            return_value=mock_db,
+        ), patch(
             "backend.copilot.service.format_understanding_for_prompt",
             return_value="biz ctx",
         ):
             result = await inject_user_context(understanding, "hello", "sess-1", msgs)
 
         assert result is None
-        mock_update.assert_not_awaited()
+        mock_db.update_message_content_by_sequence.assert_not_awaited()
 
 
 class TestCacheableSystemPromptContent:

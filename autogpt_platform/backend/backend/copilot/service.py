@@ -17,13 +17,12 @@ from langfuse.openai import (
     AsyncOpenAI as LangfuseAsyncOpenAI,  # pyright: ignore[reportPrivateImportUsage]
 )
 
-from backend.data.db_accessors import understanding_db
+from backend.data.db_accessors import chat_db, understanding_db
 from backend.data.understanding import format_understanding_for_prompt
 from backend.util.exceptions import NotAuthorizedError, NotFoundError
 from backend.util.settings import AppEnvironment, Settings
 
 from .config import ChatConfig
-from .db import update_message_content_by_sequence
 from .model import (
     ChatMessage,
     ChatSessionInfo,
@@ -153,7 +152,9 @@ async def inject_user_context(
         if session_msg.role == "user":
             session_msg.content = prefixed
             sequence = session_msg.sequence if session_msg.sequence is not None else idx
-            await update_message_content_by_sequence(session_id, sequence, prefixed)
+            await chat_db().update_message_content_by_sequence(
+                session_id, sequence, prefixed
+            )
             return prefixed
     return None
 
