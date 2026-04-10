@@ -71,7 +71,7 @@ class RunAgentInput(BaseModel):
     cron: str = ""
     timezone: str = "UTC"
     wait_for_result: int = Field(default=0, ge=0, le=300)
-    dry_run: bool = False
+    dry_run: bool = Field(default=False)
 
     @field_validator(
         "username_agent_slug",
@@ -153,11 +153,7 @@ class RunAgentTool(BaseTool):
                 },
                 "dry_run": {
                     "type": "boolean",
-                    "description": (
-                        "When true, simulates the entire agent execution using an LLM "
-                        "for each block — no real API calls, no credentials needed, "
-                        "no credits charged. Useful for testing agent wiring end-to-end."
-                    ),
+                    "description": "Simulate the agent run without executing real actions (default: false). Use when testing agent behaviour or when the user explicitly asks for a dry run.",
                 },
             },
             "required": [],
@@ -174,8 +170,17 @@ class RunAgentTool(BaseTool):
         session: ChatSession,
         **kwargs,
     ) -> ToolResponseBase:
-        """Execute the tool with automatic state detection."""
+        """Execute the tool with automatic state detection.
+
+        Note: This tool accepts **kwargs and delegates to RunAgentInput for
+        validation because the parameter set is complex with cross-field
+        validators defined in the Pydantic model.
+        """
         params = RunAgentInput(**kwargs)
+        # Session-level dry_run forces all runs to be dry. In normal sessions
+        # the LLM may still request dry_run=True on individual calls.
+        if session.dry_run:
+            params.dry_run = True
         session_id = session.session_id
 
         # Validate at least one identifier is provided
@@ -200,6 +205,18 @@ class RunAgentTool(BaseTool):
 
         # Determine if this is a schedule request
         is_schedule = bool(params.schedule_name or params.cron)
+
+        # Session-level dry-run blocks scheduling — schedules create real
+        # side effects that cannot be simulated.
+        if params.dry_run and is_schedule:
+            return ErrorResponse(
+                message=(
+                    "Scheduling is disabled in dry-run mode because it creates "
+                    "real side effects. Remove cron/schedule_name to simulate "
+                    "a run, or disable dry-run to create a real schedule."
+                ),
+                session_id=session_id,
+            )
 
         try:
             # Step 1: Fetch agent details
@@ -354,8 +371,9 @@ class RunAgentTool(BaseTool):
     ) -> tuple[dict[str, CredentialsMetaInput], ToolResponseBase | None]:
         """Validate credentials and inputs before execution.
 
-        Dry runs skip all prerequisite gates (credentials, input prompts)
-        since simulate_block doesn't need real credentials or complete inputs.
+        Dry runs skip all prerequisite gates (credentials, input prompts).
+        The dry_run flag is read from params.dry_run (which may be set by the
+        LLM per-call, or forced to True when session.dry_run is True).
 
         Returns:
             (graph_credentials, error_response) — error_response is None when ready.
@@ -458,8 +476,8 @@ class RunAgentTool(BaseTool):
         graph: GraphModel,
         graph_credentials: dict[str, CredentialsMetaInput],
         inputs: dict[str, Any],
+        dry_run: bool,
         wait_for_result: int = 0,
-        dry_run: bool = False,
     ) -> ToolResponseBase:
         """Execute an agent immediately, optionally waiting for completion."""
         session_id = session.session_id

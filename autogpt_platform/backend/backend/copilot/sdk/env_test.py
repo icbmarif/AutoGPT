@@ -41,11 +41,9 @@ class TestBuildSdkEnvSubscription:
 
             result = build_sdk_env()
 
-        assert result == {
-            "ANTHROPIC_API_KEY": "",
-            "ANTHROPIC_AUTH_TOKEN": "",
-            "ANTHROPIC_BASE_URL": "",
-        }
+        assert result["ANTHROPIC_API_KEY"] == ""
+        assert result["ANTHROPIC_AUTH_TOKEN"] == ""
+        assert result["ANTHROPIC_BASE_URL"] == ""
         mock_validate.assert_called_once()
 
     @patch(
@@ -68,18 +66,20 @@ class TestBuildSdkEnvSubscription:
 
 
 class TestBuildSdkEnvDirectAnthropic:
-    """When OpenRouter is inactive, return empty dict (inherit parent env)."""
+    """When OpenRouter is inactive, no ANTHROPIC_* overrides (inherit parent env)."""
 
-    def test_returns_empty_dict_when_openrouter_inactive(self):
+    def test_no_anthropic_key_overrides_when_openrouter_inactive(self):
         cfg = _make_config(use_openrouter=False)
         with patch("backend.copilot.sdk.env.config", cfg):
             from backend.copilot.sdk.env import build_sdk_env
 
             result = build_sdk_env()
 
-        assert result == {}
+        assert "ANTHROPIC_API_KEY" not in result
+        assert "ANTHROPIC_AUTH_TOKEN" not in result
+        assert "ANTHROPIC_BASE_URL" not in result
 
-    def test_returns_empty_dict_when_openrouter_flag_true_but_no_key(self):
+    def test_no_anthropic_key_overrides_when_openrouter_flag_true_but_no_key(self):
         """OpenRouter flag is True but no api_key => openrouter_active is False."""
         cfg = _make_config(use_openrouter=True, base_url="https://openrouter.ai/api/v1")
         # Force api_key to None after construction (field_validator may pick up env vars)
@@ -90,7 +90,9 @@ class TestBuildSdkEnvDirectAnthropic:
 
             result = build_sdk_env()
 
-        assert result == {}
+        assert "ANTHROPIC_API_KEY" not in result
+        assert "ANTHROPIC_AUTH_TOKEN" not in result
+        assert "ANTHROPIC_BASE_URL" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +214,33 @@ class TestBuildSdkEnvOpenRouter:
         value = header_line.split(": ", 1)[1]
         assert len(value) == 128
 
+    @pytest.mark.parametrize(
+        ("bad_input", "expected_ascii"),
+        [
+            ("user\x00id", "userid"),  # null byte
+            ("user\x7fid", "userid"),  # DEL
+            ("user\x80id", "userid"),  # first C1 control char
+            ("user\x9fid", "userid"),  # last C1 control char
+            ("user\U0001f600id", "userid"),  # emoji (non-ASCII Unicode)
+            ("user\u202eid", "userid"),  # RTL override (security-relevant)
+        ],
+    )
+    def test_header_sanitizer_strips_non_printable_ascii(
+        self, bad_input: str, expected_ascii: str
+    ):
+        """_safe() strips everything outside printable ASCII 0x20–0x7e."""
+        cfg = self._openrouter_config()
+        with patch("backend.copilot.sdk.env.config", cfg):
+            from backend.copilot.sdk.env import build_sdk_env
+
+            result = build_sdk_env(session_id=bad_input)
+
+        value = result["ANTHROPIC_CUSTOM_HEADERS"].split(": ", 1)[1]
+        assert expected_ascii in value
+        for char in bad_input:
+            if ord(char) < 0x20 or ord(char) > 0x7E:
+                assert char not in value
+
 
 # ---------------------------------------------------------------------------
 # Mode priority
@@ -234,9 +263,60 @@ class TestBuildSdkEnvModePriority:
 
             result = build_sdk_env()
 
-        # Should get subscription result, not OpenRouter
-        assert result == {
-            "ANTHROPIC_API_KEY": "",
-            "ANTHROPIC_AUTH_TOKEN": "",
-            "ANTHROPIC_BASE_URL": "",
-        }
+        # Should get subscription result (blanked keys), not OpenRouter proxy
+        assert result["ANTHROPIC_API_KEY"] == ""
+        assert result["ANTHROPIC_AUTH_TOKEN"] == ""
+        assert result["ANTHROPIC_BASE_URL"] == ""
+        # OpenRouter-specific key must NOT be present
+        assert "ANTHROPIC_CUSTOM_HEADERS" not in result
+
+
+# ---------------------------------------------------------------------------
+# CLAUDE_CODE_TMPDIR integration
+# ---------------------------------------------------------------------------
+
+
+class TestClaudeCodeTmpdir:
+    """Verify build_sdk_env() sets CLAUDE_CODE_TMPDIR from *sdk_cwd*."""
+
+    def test_tmpdir_set_when_sdk_cwd_is_truthy(self):
+        """CLAUDE_CODE_TMPDIR is set to sdk_cwd when sdk_cwd is truthy."""
+        cfg = _make_config(use_openrouter=False)
+        with patch("backend.copilot.sdk.env.config", cfg):
+            from backend.copilot.sdk.env import build_sdk_env
+
+            result = build_sdk_env(sdk_cwd="/tmp/copilot-workspace")
+
+        assert result["CLAUDE_CODE_TMPDIR"] == "/tmp/copilot-workspace"
+
+    def test_tmpdir_not_set_when_sdk_cwd_is_none(self):
+        """CLAUDE_CODE_TMPDIR is NOT in the env when sdk_cwd is None."""
+        cfg = _make_config(use_openrouter=False)
+        with patch("backend.copilot.sdk.env.config", cfg):
+            from backend.copilot.sdk.env import build_sdk_env
+
+            result = build_sdk_env(sdk_cwd=None)
+
+        assert "CLAUDE_CODE_TMPDIR" not in result
+
+    def test_tmpdir_not_set_when_sdk_cwd_is_empty_string(self):
+        """CLAUDE_CODE_TMPDIR is NOT in the env when sdk_cwd is empty string."""
+        cfg = _make_config(use_openrouter=False)
+        with patch("backend.copilot.sdk.env.config", cfg):
+            from backend.copilot.sdk.env import build_sdk_env
+
+            result = build_sdk_env(sdk_cwd="")
+
+        assert "CLAUDE_CODE_TMPDIR" not in result
+
+    @patch("backend.copilot.sdk.env.validate_subscription")
+    def test_tmpdir_set_in_subscription_mode(self, mock_validate):
+        """CLAUDE_CODE_TMPDIR is set even in subscription mode."""
+        cfg = _make_config(use_claude_code_subscription=True)
+        with patch("backend.copilot.sdk.env.config", cfg):
+            from backend.copilot.sdk.env import build_sdk_env
+
+            result = build_sdk_env(sdk_cwd="/tmp/sub-workspace")
+
+        assert result["CLAUDE_CODE_TMPDIR"] == "/tmp/sub-workspace"
+        assert result["ANTHROPIC_API_KEY"] == ""

@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import sys
@@ -29,16 +30,30 @@ from claude_agent_sdk import (
 )
 from langfuse import propagate_attributes
 from langsmith.integrations.claude_agent_sdk import configure_claude_agent_sdk
+from opentelemetry import trace as otel_trace
 from pydantic import BaseModel
 
 from backend.copilot.context import get_workspace_manager
 from backend.copilot.permissions import apply_tool_permissions
+from backend.copilot.rate_limit import get_user_tier
+from backend.copilot.transcript import (
+    _run_compression,
+    cleanup_stale_project_dirs,
+    compact_transcript,
+    download_transcript,
+    read_compacted_entries,
+    upload_transcript,
+    validate_transcript,
+    write_transcript_to_tempfile,
+)
+from backend.copilot.transcript_builder import TranscriptBuilder
 from backend.data.redis_client import get_redis_async
+from backend.data.understanding import format_understanding_for_prompt
 from backend.executor.cluster_lock import AsyncClusterLock
 from backend.util.exceptions import NotFoundError
 from backend.util.settings import Settings
 
-from ..config import ChatConfig
+from ..config import ChatConfig, CopilotMode
 from ..constants import (
     COPILOT_ERROR_PREFIX,
     COPILOT_RETRYABLE_ERROR_PREFIX,
@@ -47,30 +62,35 @@ from ..constants import (
     is_transient_api_error,
 )
 from ..context import encode_cwd_for_cli
+from ..db import update_message_content_by_sequence
+from ..graphiti.config import is_enabled_for_user
 from ..model import (
     ChatMessage,
     ChatSession,
     get_chat_session,
-    update_session_title,
+    maybe_append_user_message,
     upsert_chat_session,
 )
-from ..prompting import get_sdk_supplement
+from ..prompting import get_graphiti_supplement, get_sdk_supplement
 from ..response_model import (
     StreamBaseResponse,
     StreamError,
     StreamFinish,
+    StreamFinishStep,
     StreamHeartbeat,
     StreamStart,
+    StreamStartStep,
     StreamStatus,
     StreamTextDelta,
     StreamToolInputAvailable,
+    StreamToolInputStart,
     StreamToolOutputAvailable,
     StreamUsage,
 )
 from ..service import (
-    _build_system_prompt,
-    _generate_session_title,
+    _build_cacheable_system_prompt,
     _is_langfuse_configured,
+    _update_title_async,
 )
 from ..token_tracking import persist_and_record_usage
 from ..tools.e2b_sandbox import get_or_create_sandbox, pause_sandbox_direct
@@ -81,27 +101,14 @@ from .env import build_sdk_env  # noqa: F401 — re-export for backward compat
 from .response_adapter import SDKResponseAdapter
 from .security_hooks import create_security_hooks
 from .tool_adapter import (
-    cancel_pending_tool_tasks,
     create_copilot_mcp_server,
     get_copilot_tool_names,
     get_sdk_disallowed_tools,
-    pre_launch_tool_call,
     reset_stash_event,
     reset_tool_failure_counters,
     set_execution_context,
     wait_for_stash,
 )
-from .transcript import (
-    _run_compression,
-    cleanup_stale_project_dirs,
-    compact_transcript,
-    download_transcript,
-    read_compacted_entries,
-    upload_transcript,
-    validate_transcript,
-    write_transcript_to_tempfile,
-)
-from .transcript_builder import TranscriptBuilder
 
 logger = logging.getLogger(__name__)
 config = ChatConfig()
@@ -115,9 +122,10 @@ _MAX_STREAM_ATTEMPTS = 3
 
 # Hard circuit breaker: abort the stream if the model sends this many
 # consecutive tool calls with empty parameters (a sign of context
-# saturation or serialization failure).  Empty input ({}) is never
-# legitimate — even one is suspicious, three is conclusive.
-_EMPTY_TOOL_CALL_LIMIT = 3
+# saturation or serialization failure).  The MCP wrapper now returns
+# guidance on the first empty call, giving the model a chance to
+# self-correct.  The limit is generous to allow recovery attempts.
+_EMPTY_TOOL_CALL_LIMIT = 5
 
 # User-facing error shown when the empty-tool-call circuit breaker trips.
 _CIRCUIT_BREAKER_ERROR_MSG = (
@@ -125,6 +133,32 @@ _CIRCUIT_BREAKER_ERROR_MSG = (
     "— this usually happens when the response is "
     "too large to fit in a single tool call. "
     "Try breaking your request into smaller parts."
+)
+
+# Idle timeout: abort the stream if no meaningful SDK message (only heartbeats)
+# arrives for this many seconds. This catches hung tool calls (e.g. WebSearch
+# hanging on a search provider that never responds).
+_IDLE_TIMEOUT_SECONDS = 10 * 60  # 10 minutes
+
+# Event types that are ephemeral / cosmetic and must NOT be counted toward
+# ``events_yielded`` in the transient-retry loop.  Counting them would prevent
+# the backoff retry from firing because ``_next_transient_backoff`` returns
+# ``None`` when ``events_yielded > 0``.
+_EPHEMERAL_EVENT_TYPES = (
+    StreamHeartbeat,
+    # Compaction UI events are cosmetic and must not block retry — they're
+    # emitted before the SDK query on compacted attempts.
+    StreamStartStep,
+    StreamFinishStep,
+    StreamToolInputStart,
+    StreamToolInputAvailable,
+    StreamToolOutputAvailable,
+    # Transient StreamError and StreamStatus are ephemeral notifications,
+    # not content.  Counting them would prevent the backoff retry from
+    # firing because _next_transient_backoff() returns None when
+    # events_yielded > 0.
+    StreamError,
+    StreamStatus,
 )
 
 # Patterns that indicate the prompt/request exceeds the model's context limit.
@@ -536,17 +570,34 @@ async def _iter_sdk_messages(
                 pass
 
 
+def _normalize_model_name(raw_model: str) -> str:
+    """Normalize a model name for the current routing configuration.
+
+    Applies two transformations shared by both the primary and fallback
+    model resolution paths:
+
+    1. **Strip provider prefix** — OpenRouter-style names like
+       ``"anthropic/claude-opus-4.6"`` are reduced to ``"claude-opus-4.6"``.
+    2. **Dot-to-hyphen conversion** — when *not* routing through OpenRouter
+       the direct Anthropic API requires hyphen-separated versions
+       (``"claude-opus-4-6"``), so dots are replaced with hyphens.
+    """
+    model = raw_model
+    if "/" in model:
+        model = model.split("/", 1)[1]
+    # OpenRouter uses dots in versions (claude-opus-4.6) but the direct
+    # Anthropic API requires hyphens (claude-opus-4-6).  Only normalise
+    # when NOT routing through OpenRouter.
+    if not config.openrouter_active:
+        model = model.replace(".", "-")
+    return model
+
+
 def _resolve_sdk_model() -> str | None:
     """Resolve the model name for the Claude Agent SDK CLI.
 
     Uses `config.claude_agent_model` if set, otherwise derives from
-    `config.model` by stripping the OpenRouter provider prefix (e.g.,
-    `"anthropic/claude-opus-4.6"` → `"claude-opus-4-6"`).
-
-    OpenRouter uses dot-separated versions (`claude-opus-4.6`) while the
-    direct Anthropic API uses hyphen-separated versions (`claude-opus-4-6`).
-    Normalisation is only applied when the SDK will actually talk to
-    Anthropic directly (not through OpenRouter).
+    `config.model` via :func:`_normalize_model_name`.
 
     When `use_claude_code_subscription` is enabled and no explicit
     `claude_agent_model` is set, returns `None` so the CLI uses the
@@ -556,15 +607,96 @@ def _resolve_sdk_model() -> str | None:
         return config.claude_agent_model
     if config.use_claude_code_subscription:
         return None
-    model = config.model
-    if "/" in model:
-        model = model.split("/", 1)[1]
-    # OpenRouter uses dots in versions (claude-opus-4.6) but the direct
-    # Anthropic API requires hyphens (claude-opus-4-6).  Only normalise
-    # when NOT routing through OpenRouter.
-    if not config.openrouter_active:
-        model = model.replace(".", "-")
-    return model
+    return _normalize_model_name(config.model)
+
+
+def _resolve_fallback_model() -> str | None:
+    """Resolve the fallback model name via :func:`_normalize_model_name`.
+
+    Returns ``None`` when no fallback is configured (empty string).
+    """
+    raw = config.claude_agent_fallback_model
+    if not raw:
+        return None
+    return _normalize_model_name(raw)
+
+
+_MAX_TRANSIENT_BACKOFF_SECONDS = 30
+
+
+def _compute_transient_backoff(attempt: int) -> int:
+    """Return the exponential backoff delay (seconds) for a transient retry.
+
+    ``attempt`` is 1-based: first retry → ~1 s, second → ~2 s, third → ~4 s,
+    …, capped at :data:`_MAX_TRANSIENT_BACKOFF_SECONDS`.
+
+    Full-jitter (``0.5 … 1.0 × base``) is applied to spread retries from
+    multiple tenants hitting the same 429/529 simultaneously (thundering herd).
+    The result is rounded to the nearest integer so the ``StreamStatus``
+    message is human-readable.
+
+    Extracted as a module-level pure function so it can be unit-tested
+    independently of the closure that wraps it inside the retry loop.
+    """
+    base = min(_MAX_TRANSIENT_BACKOFF_SECONDS, 2 ** (attempt - 1))
+    return max(1, round(base * (0.5 + random.random() * 0.5)))
+
+
+def _next_transient_backoff(
+    events_yielded: int,
+    transient_retries: int,
+    max_transient_retries: int,
+) -> tuple[int | None, int]:
+    """Decide whether to retry after a transient error.
+
+    Returns ``(backoff_seconds, updated_retries)``.  ``backoff_seconds`` is
+    ``None`` when no retry should be attempted — either content has already
+    been streamed to the frontend (``events_yielded > 0``, retrying would
+    produce duplicates) or the retry budget is exhausted.
+
+    Extracted as a module-level pure function so it can be unit-tested
+    independently of the retry loop.
+    """
+    if events_yielded > 0:
+        return None, transient_retries
+    new_retries = transient_retries + 1
+    if new_retries > max_transient_retries:
+        return None, new_retries
+    return _compute_transient_backoff(new_retries), new_retries
+
+
+async def _do_transient_backoff(
+    backoff: int,
+    state: _RetryState,
+    message_id: str,
+    session_id: str,
+) -> AsyncIterator[StreamStatus]:
+    """Emit a retry notification, sleep, and reset the SDK adapter.
+
+    Yields a single :class:`StreamStatus` so the caller can forward it to
+    the client, then sleeps for *backoff* seconds and resets ``state.adapter``
+    and ``state.usage`` so the next attempt starts clean.
+
+    Extracted from both exception handlers in the retry loop to remove
+    near-identical code duplication.
+    """
+    yield StreamStatus(message=f"Connection interrupted, retrying in {backoff}s…")
+    await asyncio.sleep(backoff)
+    state.adapter = SDKResponseAdapter(message_id=message_id, session_id=session_id)
+    state.usage.reset()
+
+
+def _is_fallback_stderr(line: str) -> bool:
+    """Return True if a CLI stderr line signals fallback-model activation.
+
+    Matches ``"fallback model"`` case-insensitively.  Uses the specific
+    two-word phrase rather than just ``"fallback"`` to avoid false positives
+    from unrelated CLI stderr lines (tool retries, cached-result fallbacks).
+
+    Extracted as a module-level pure function so it can be unit-tested
+    without wiring up the full ``_on_stderr`` closure.
+    """
+    return "fallback model" in line.lower()
 
 
 def _make_sdk_cwd(session_id: str) -> str:
@@ -723,6 +855,65 @@ async def _compress_messages(
     return messages, False
 
 
+def _session_messages_to_transcript(messages: list[ChatMessage]) -> str:
+    """Convert session ChatMessages to JSONL transcript for ``--resume``.
+
+    Reconstructs proper ``tool_use`` and ``tool_result`` content blocks from
+    :attr:`ChatMessage.tool_calls` and :attr:`ChatMessage.tool_call_id` so the
+    Claude CLI receives full structural context when no previous transcript file
+    is available (e.g. first turn after a storage failure or compaction drop).
+
+    This gives the model the same fidelity as an on-disk session JSONL file —
+    preserving tool call names, IDs, inputs, and *complete* (un-truncated)
+    tool results — rather than the lossy plain-text injection produced by
+    :func:`_format_conversation_context` (which caps tool results at 500 chars
+    and discards structural linkage).
+
+    Args:
+        messages: Prior session messages, typically ``session.messages[:-1]``
+            (all turns except the current user query).
+
+    Returns:
+        A JSONL string suitable for writing to a temp file and passing as
+        ``ClaudeAgentOptions.resume``.  Returns an empty string if the input
+        list is empty after filtering compaction entries.
+    """
+    filtered = filter_compaction_messages(messages)
+    if not filtered:
+        return ""
+    builder = TranscriptBuilder()
+    for msg in filtered:
+        if msg.role == "user" and msg.content:
+            builder.append_user(msg.content)
+        elif msg.role == "assistant":
+            blocks: list[dict[str, Any]] = []
+            if msg.content:
+                blocks.append({"type": "text", "text": msg.content})
+            for tc in msg.tool_calls or []:
+                try:
+                    tc_input: dict[str, Any] = json.loads(
+                        tc.get("function", {}).get("arguments", "{}")
+                    )
+                except (json.JSONDecodeError, ValueError):
+                    tc_input = {}
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": tc.get("id", ""),
+                        "name": tc.get("function", {}).get("name", ""),
+                        "input": tc_input,
+                    }
+                )
+            if blocks:
+                builder.append_assistant(blocks)
+        elif msg.role == "tool" and msg.tool_call_id:
+            builder.append_tool_result(
+                tool_use_id=msg.tool_call_id,
+                content=msg.content or "",
+            )
+    return builder.to_jsonl()
+
+
 def _format_conversation_context(messages: list[ChatMessage]) -> str | None:
     """Format conversation messages into a context prefix for the user message.
 
@@ -746,15 +937,11 @@ def _format_conversation_context(messages: list[ChatMessage]) -> str | None:
         elif msg.role == "assistant":
             if msg.content:
                 lines.append(f"You responded: {msg.content}")
-            if msg.tool_calls:
-                for tc in msg.tool_calls:
-                    func = tc.get("function", {})
-                    tool_name = func.get("name", "unknown")
-                    tool_args = func.get("arguments", "")
-                    lines.append(f"You called tool: {tool_name}({tool_args})")
+            # Omit tool_calls — any text representation gets mimicked
+            # by the model. Tool results below provide the context.
         elif msg.role == "tool":
             content = msg.content or ""
-            lines.append(f"Tool result: {content}")
+            lines.append(f"Tool output: {content[:500]}")
 
     if not lines:
         return None
@@ -1058,17 +1245,25 @@ def _dispatch_response(
 
 
 class _HandledStreamError(Exception):
-    """Raised by `_run_stream_attempt` after it has already yielded a
-    `StreamError` to the client (e.g. transient API error, circuit breaker).
+    """Raised by `_run_stream_attempt` when an attempt fails and the outer
+    retry loop must roll back session state.
 
-    This signals the outer retry loop that the attempt failed so it can
-    perform session-message rollback and set the `ended_with_stream_error`
-    flag, **without** yielding a duplicate `StreamError` to the client.
+    Two sub-cases:
+
+    * ``already_yielded=True`` (default) — a ``StreamError`` was already sent
+      to the client inside ``_run_stream_attempt`` (circuit-breaker, idle
+      timeout, etc.).  The outer loop must **not** yield another one.
+    * ``already_yielded=False`` — the error is transient and the outer loop
+      will decide whether to retry or surface the error.  If retrying it
+      yields a ``StreamStatus("retrying…")``; if exhausted it yields the
+      ``StreamError`` itself so the client sees it only once.
 
     Attributes:
         error_msg: The user-facing error message to persist.
         code: Machine-readable error code (e.g. ``circuit_breaker_empty_tool_calls``).
         retryable: Whether the frontend should offer a retry button.
+        already_yielded: ``True`` when ``StreamError`` was already sent to the
+            client before this exception was raised.
     """
 
     def __init__(
@@ -1077,11 +1272,13 @@ class _HandledStreamError(Exception):
         error_msg: str | None = None,
         code: str | None = None,
         retryable: bool = True,
+        already_yielded: bool = True,
     ):
         super().__init__(message)
         self.error_msg = error_msg
         self.code = code
         self.retryable = retryable
+        self.already_yielded = already_yielded
 
 
 @dataclass
@@ -1214,6 +1411,14 @@ async def _run_stream_attempt(
 
     consecutive_empty_tool_calls = 0
 
+    # --- Intermediate persistence tracking ---
+    # Flush session messages to DB periodically so page reloads show progress
+    # during long-running turns (see incident d2f7cba3: 82-min turn lost on refresh).
+    _last_flush_time = time.monotonic()
+    _msgs_since_flush = 0
+    _FLUSH_INTERVAL_SECONDS = 30.0
+    _FLUSH_MESSAGE_THRESHOLD = 10
+
     # Use manual __aenter__/__aexit__ instead of ``async with`` so we can
     # suppress SDK cleanup errors that occur when the SSE client disconnects
     # mid-stream.  GeneratorExit causes the SDK's ``__aexit__`` to run in a
@@ -1265,6 +1470,8 @@ async def _run_stream_attempt(
             await client.query(state.query_message, session_id=ctx.session_id)
             state.transcript_builder.append_user(content=ctx.current_message)
 
+        _last_real_msg_time = time.monotonic()
+
         async for sdk_msg in _iter_sdk_messages(client):
             # Heartbeat sentinel — refresh lock and keep SSE alive
             if sdk_msg is None:
@@ -1272,7 +1479,33 @@ async def _run_stream_attempt(
                 for ev in ctx.compaction.emit_start_if_ready():
                     yield ev
                 yield StreamHeartbeat()
+
+                # Idle timeout: if no real SDK message for too long, a tool
+                # call is likely hung (e.g. WebSearch provider not responding).
+                idle_seconds = time.monotonic() - _last_real_msg_time
+                if idle_seconds >= _IDLE_TIMEOUT_SECONDS:
+                    logger.error(
+                        "%s Idle timeout after %.0fs with no SDK message — "
+                        "aborting stream (likely hung tool call)",
+                        ctx.log_prefix,
+                        idle_seconds,
+                    )
+                    stream_error_msg = (
+                        "A tool call appears to be stuck "
+                        "(no response for 10 minutes). "
+                        "Please try again."
+                    )
+                    stream_error_code = "idle_timeout"
+                    _append_error_marker(ctx.session, stream_error_msg, retryable=True)
+                    yield StreamError(
+                        errorText=stream_error_msg,
+                        code=stream_error_code,
+                    )
+                    ended_with_stream_error = True
+                    break
                 continue
+
+            _last_real_msg_time = time.monotonic()
 
             logger.info(
                 "%s Received: %s %s (unresolved=%d, current=%d, resolved=%d)",
@@ -1300,6 +1533,27 @@ async def _run_stream_attempt(
                     error_preview,
                 )
 
+                # Intercept prompt-too-long errors surfaced as
+                # AssistantMessage.error (not as a Python exception).
+                # Re-raise so the outer retry loop can compact the
+                # transcript and retry with reduced context.
+                # Check both error_text and error_preview: sdk_error
+                # being set confirms this is an error message (not user
+                # content), so checking content is safe. The actual
+                # error description (e.g. "Prompt is too long") may be
+                # in the content, not the error type field
+                # (e.g. error="invalid_request", content="Prompt is
+                # too long").
+                if _is_prompt_too_long(Exception(error_text)) or _is_prompt_too_long(
+                    Exception(error_preview)
+                ):
+                    logger.warning(
+                        "%s Prompt-too-long detected via AssistantMessage "
+                        "error — raising for retry",
+                        ctx.log_prefix,
+                    )
+                    raise RuntimeError("Prompt is too long")
+
                 # Intercept transient API errors (socket closed,
                 # ECONNRESET) — replace the raw message with a
                 # user-friendly error text and use the retryable
@@ -1315,40 +1569,26 @@ async def _run_stream_attempt(
                     )
                     stream_error_msg = FRIENDLY_TRANSIENT_MSG
                     stream_error_code = "transient_api_error"
-                    _append_error_marker(
-                        ctx.session,
-                        stream_error_msg,
-                        retryable=True,
-                    )
-                    yield StreamError(
-                        errorText=stream_error_msg,
-                        code=stream_error_code,
-                    )
+                    # Do NOT yield StreamError or append error marker here.
+                    # The outer retry loop decides: if a retry is available it
+                    # yields StreamStatus("retrying…"); if retries are exhausted
+                    # it appends the marker and yields StreamError exactly once.
+                    # Yielding StreamError before the retry decision causes the
+                    # client to display an error that is immediately superseded.
                     ended_with_stream_error = True
                     break
 
-            # Parallel tool execution: pre-launch every ToolUseBlock as an
-            # asyncio.Task the moment its AssistantMessage arrives.  The SDK
-            # sends one AssistantMessage per tool call when issuing parallel
-            # calls, so each message is pre-launched independently.  The MCP
-            # handlers will await the already-running task instead of executing
-            # fresh, making all concurrent tool calls run in parallel.
-            #
-            # Also determine if the message is a tool-only batch (all content
+            # Determine if the message is a tool-only batch (all content
             # items are ToolUseBlocks) — such messages have no text output yet,
             # so we skip the wait_for_stash flush below.
+            #
+            # Note: parallel execution of tools is handled natively by the
+            # SDK CLI via readOnlyHint annotations on tool definitions.
             is_tool_only = False
             if isinstance(sdk_msg, AssistantMessage) and sdk_msg.content:
-                is_tool_only = True
-                # NOTE: Pre-launches are sequential (each await completes
-                # file-ref expansion before the next starts).  This is fine
-                # since expansion is typically sub-ms; a future optimisation
-                # could gather all pre-launches concurrently.
-                for tool_use in sdk_msg.content:
-                    if isinstance(tool_use, ToolUseBlock):
-                        await pre_launch_tool_call(tool_use.name, tool_use.input)
-                    else:
-                        is_tool_only = False
+                is_tool_only = all(
+                    isinstance(item, ToolUseBlock) for item in sdk_msg.content
+                )
 
             # Race-condition fix: SDK hooks (PostToolUse) are
             # executed asynchronously via start_soon() — the next
@@ -1405,6 +1645,16 @@ async def _run_stream_attempt(
                         sdk_msg.result or "(no error message provided)",
                     )
 
+                # Check for prompt-too-long regardless of subtype — the
+                # SDK may return subtype="success" with result="Prompt is
+                # too long" when the CLI rejects the prompt before calling
+                # the API (cost_usd=0, no tokens consumed).  If we only
+                # check the "error" subtype path, the stream appears to
+                # complete normally, the synthetic error text is stored
+                # in the transcript, and the session grows without bound.
+                if _is_prompt_too_long(RuntimeError(sdk_msg.result or "")):
+                    raise RuntimeError("Prompt is too long")
+
                 # Capture token usage from ResultMessage.
                 # Anthropic reports cached tokens separately:
                 #   input_tokens = uncached only
@@ -1436,6 +1686,23 @@ async def _run_stream_attempt(
             # Emit compaction end if SDK finished compacting.
             # Sync TranscriptBuilder with the CLI's active context.
             compact_result = await ctx.compaction.emit_end_if_ready(ctx.session)
+            if compact_result.events:
+                # Compaction events end with StreamFinishStep, which maps to
+                # Vercel AI SDK's "finish-step" — that clears activeTextParts.
+                # Close any open text block BEFORE the compaction events so
+                # the text-end arrives before finish-step, preventing
+                # "text-end for missing text part" errors on the frontend.
+                pre_close: list[StreamBaseResponse] = []
+                state.adapter._end_text_if_open(pre_close)
+                # Compaction events bypass the adapter, so sync step state
+                # when a StreamFinishStep is present — otherwise the adapter
+                # will skip StreamStartStep on the next AssistantMessage.
+                if any(
+                    isinstance(ev, StreamFinishStep) for ev in compact_result.events
+                ):
+                    state.adapter.step_open = False
+                for r in pre_close:
+                    yield r
             for ev in compact_result.events:
                 yield ev
             entries_replaced = False
@@ -1481,6 +1748,46 @@ async def _run_stream_attempt(
                     content_blocks=_format_sdk_content_blocks(sdk_msg.content),
                     model=sdk_msg.model,
                 )
+
+            # --- Intermediate persistence ---
+            # Flush session messages to DB periodically so page reloads
+            # show progress during long-running turns.
+            #
+            # IMPORTANT: Skip the flush while tool calls are pending
+            # (tool_calls set on assistant but results not yet received).
+            # The DB save is append-only (uses start_sequence), so if we
+            # flush the assistant message before tool_calls are set on it
+            # (text and tool_use arrive as separate SDK events), the
+            # tool_calls update is lost — the next flush starts past it.
+            _msgs_since_flush += 1
+            now = time.monotonic()
+            has_pending_tools = (
+                acc.has_appended_assistant
+                and acc.accumulated_tool_calls
+                and not acc.has_tool_results
+            )
+            if not has_pending_tools and (
+                _msgs_since_flush >= _FLUSH_MESSAGE_THRESHOLD
+                or (now - _last_flush_time) >= _FLUSH_INTERVAL_SECONDS
+            ):
+                try:
+                    await asyncio.shield(upsert_chat_session(ctx.session))
+                    logger.debug(
+                        "%s Intermediate flush: %d messages "
+                        "(msgs_since=%d, elapsed=%.1fs)",
+                        ctx.log_prefix,
+                        len(ctx.session.messages),
+                        _msgs_since_flush,
+                        now - _last_flush_time,
+                    )
+                except Exception as flush_err:
+                    logger.warning(
+                        "%s Intermediate flush failed: %s",
+                        ctx.log_prefix,
+                        flush_err,
+                    )
+                _last_flush_time = now
+                _msgs_since_flush = 0
 
             if acc.stream_completed:
                 break
@@ -1540,14 +1847,16 @@ async def _run_stream_attempt(
     ) and not acc.has_appended_assistant:
         ctx.session.messages.append(acc.assistant_response)
 
-    # If the attempt ended with a transient error that was already surfaced
-    # to the client (StreamError yielded above), raise so the outer retry
-    # loop can rollback session messages and set its error flags properly.
+    # Raise so the outer retry loop can rollback session messages.
+    # already_yielded=False for transient_api_error: StreamError was NOT
+    # sent to the client yet (the outer loop does it when retries are
+    # exhausted, avoiding a premature error flash before the retry).
     if ended_with_stream_error:
         raise _HandledStreamError(
-            "Stream error handled — StreamError already yielded",
+            "Stream error handled",
             error_msg=stream_error_msg,
             code=stream_error_code,
+            already_yielded=(stream_error_code != "transient_api_error"),
         )
 
 
@@ -1559,6 +1868,7 @@ async def stream_chat_completion_sdk(
     session: ChatSession | None = None,
     file_ids: list[str] | None = None,
     permissions: "CopilotPermissions | None" = None,
+    mode: CopilotMode | None = None,
     **_kwargs: Any,
 ) -> AsyncIterator[StreamBaseResponse]:
     """Stream chat completion using Claude Agent SDK.
@@ -1567,7 +1877,10 @@ async def stream_chat_completion_sdk(
         file_ids: Optional workspace file IDs attached to the user's message.
             Images are embedded as vision content blocks; other files are
             saved to the SDK working directory for the Read tool.
+        mode: Accepted for signature compatibility with the baseline path.
+            The SDK path does not currently branch on this value.
     """
+    _ = mode  # SDK path ignores the requested mode.
 
     if session is None:
         session = await get_chat_session(session_id, user_id)
@@ -1598,19 +1911,12 @@ async def stream_chat_completion_sdk(
         )
         session.messages.pop()
 
-    # Append the new message to the session if it's not already there
-    new_message_role = "user" if is_user_message else "assistant"
-    if message and (
-        len(session.messages) == 0
-        or not (
-            session.messages[-1].role == new_message_role
-            and session.messages[-1].content == message
-        )
-    ):
-        session.messages.append(ChatMessage(role=new_message_role, content=message))
+    if maybe_append_user_message(session, message, is_user_message):
         if is_user_message:
             track_user_message(
-                user_id=user_id, session_id=session_id, message_length=len(message)
+                user_id=user_id,
+                session_id=session_id,
+                message_length=len(message or ""),
             )
 
     # Structured log prefix: [SDK][<session>][T<turn>]
@@ -1680,6 +1986,7 @@ async def stream_chat_completion_sdk(
     turn_cache_read_tokens = 0
     turn_cache_creation_tokens = 0
     turn_cost_usd: float | None = None
+    graphiti_enabled = False
 
     # Make sure there is no more code between the lock acquisition and try-block.
     try:
@@ -1751,17 +2058,32 @@ async def stream_chat_completion_sdk(
                 )
                 return None
 
-        e2b_sandbox, (base_system_prompt, _), dl = await asyncio.gather(
+        e2b_sandbox, (base_system_prompt, understanding), dl = await asyncio.gather(
             _setup_e2b(),
-            _build_system_prompt(user_id, has_conversation_history=has_history),
+            _build_cacheable_system_prompt(user_id if not has_history else None),
             _fetch_transcript(),
         )
 
         use_e2b = e2b_sandbox is not None
         # Append appropriate supplement (Claude gets tool schemas automatically)
-        system_prompt = base_system_prompt + get_sdk_supplement(
-            use_e2b=use_e2b, cwd=sdk_cwd
+
+        graphiti_enabled = await is_enabled_for_user(user_id)
+
+        graphiti_supplement = get_graphiti_supplement() if graphiti_enabled else ""
+        system_prompt = (
+            base_system_prompt
+            + get_sdk_supplement(use_e2b=use_e2b, cwd=sdk_cwd)
+            + graphiti_supplement
         )
+
+        # Warm context: pre-load relevant facts from Graphiti on first turn
+        if graphiti_enabled and user_id and len(session.messages) <= 1:
+            from backend.copilot.graphiti.context import fetch_warm_context
+
+            warm_ctx = await fetch_warm_context(user_id, message or "")
+            if warm_ctx:
+                system_prompt += f"\n\n{warm_ctx}"
+
         # Process transcript download result
         transcript_msg_count = 0
         if dl:
@@ -1795,12 +2117,48 @@ async def stream_chat_completion_sdk(
                 logger.warning("%s Transcript downloaded but invalid", log_prefix)
                 transcript_covers_prefix = False
         elif config.claude_agent_use_resume and user_id and len(session.messages) > 1:
-            logger.warning(
-                "%s No transcript available (%d messages in session)",
-                log_prefix,
-                len(session.messages),
-            )
-            transcript_covers_prefix = False
+            # No transcript on disk — try to reconstruct a full JSONL from the
+            # session.messages stored in the DB.  This gives the Claude CLI
+            # proper tool_use/tool_result structural context via --resume
+            # instead of the lossy plain-text injection in _build_query_message
+            # (which caps tool results at 500 chars and drops call/result IDs).
+            prior = session.messages[:-1]
+            reconstructed = _session_messages_to_transcript(prior)
+            if reconstructed:
+                rebuilt_resume = await asyncio.to_thread(
+                    write_transcript_to_tempfile, reconstructed, session_id, sdk_cwd
+                )
+                if rebuilt_resume:
+                    use_resume = True
+                    resume_file = rebuilt_resume
+                    transcript_msg_count = len(prior)
+                    transcript_content = reconstructed
+                    transcript_builder.load_previous(
+                        reconstructed, log_prefix=log_prefix
+                    )
+                    transcript_covers_prefix = True
+                    logger.info(
+                        "%s Reconstructed transcript from %d session messages "
+                        "for --resume (no previous transcript file)",
+                        log_prefix,
+                        len(prior),
+                    )
+                else:
+                    logger.warning(
+                        "%s Transcript reconstruction failed — write_transcript_to_tempfile"
+                        " returned None (%d messages)",
+                        log_prefix,
+                        len(prior),
+                    )
+                    transcript_covers_prefix = False
+            else:
+                logger.warning(
+                    "%s No transcript available and reconstruction produced empty"
+                    " output (%d messages in session)",
+                    log_prefix,
+                    len(session.messages),
+                )
+                transcript_covers_prefix = False
 
         yield StreamStart(messageId=message_id, sessionId=session_id)
 
@@ -1813,7 +2171,10 @@ async def stream_chat_completion_sdk(
         )
 
         # Fail fast when no API credentials are available at all.
-        sdk_env = build_sdk_env(session_id=session_id, user_id=user_id)
+        # sdk_cwd routes the CLI's temp dir into the per-session workspace
+        # so sub-agent output files land inside sdk_cwd (see build_sdk_env).
+        sdk_env = build_sdk_env(session_id=session_id, user_id=user_id, sdk_cwd=sdk_cwd)
+
         if not config.api_key and not config.use_claude_code_subscription:
             raise RuntimeError(
                 "No API key configured. Set OPEN_ROUTER_API_KEY, "
@@ -1844,8 +2205,20 @@ async def stream_chat_completion_sdk(
 
         def _on_stderr(line: str) -> None:
             """Log a stderr line emitted by the Claude CLI subprocess."""
+            nonlocal fallback_model_activated_per_attempt
             sid = session_id[:12] if session_id else "?"
             logger.info("[SDK] [%s] CLI stderr: %s", sid, line.rstrip())
+            # Detect SDK fallback-model activation via the module-level pure
+            # helper so the detection logic can be unit-tested independently.
+            # Sets the per-attempt flag which is preserved across transient
+            # retries so the user notification is never lost.
+            if not fallback_model_activated_per_attempt and _is_fallback_stderr(line):
+                fallback_model_activated_per_attempt = True
+                logger.warning(
+                    "[SDK] [%s] Fallback model activated — primary model "
+                    "overloaded, switching to fallback",
+                    sid,
+                )
 
         sdk_options_kwargs: dict[str, Any] = {
             "system_prompt": system_prompt,
@@ -1856,6 +2229,15 @@ async def stream_chat_completion_sdk(
             "cwd": sdk_cwd,
             "max_buffer_size": config.claude_agent_max_buffer_size,
             "stderr": _on_stderr,
+            # --- P0 guardrails ---
+            # fallback_model: SDK auto-retries with this cheaper model on
+            # 529 (overloaded) errors, avoiding user-visible failures.
+            "fallback_model": _resolve_fallback_model(),
+            # max_turns: hard cap on agentic tool-use loops per query to
+            # prevent runaway execution from burning budget.
+            "max_turns": config.claude_agent_max_turns,
+            # max_budget_usd: per-query spend ceiling enforced by the CLI.
+            "max_budget_usd": config.claude_agent_max_budget_usd,
         }
         if sdk_model:
             sdk_options_kwargs["model"] = sdk_model
@@ -1872,15 +2254,20 @@ async def stream_chat_completion_sdk(
         # langsmith tracing integration attaches them to every span.  This
         # is what Langfuse (or any OTEL backend) maps to its native
         # user/session fields.
+        _user_tier = await get_user_tier(user_id) if user_id else None
+        _otel_metadata: dict[str, str] = {
+            "resume": str(use_resume),
+            "conversation_turn": str(turn),
+        }
+        if _user_tier:
+            _otel_metadata["subscription_tier"] = _user_tier.value
+
         _otel_ctx = propagate_attributes(
             user_id=user_id,
             session_id=session_id,
             trace_name="copilot-sdk",
             tags=["sdk"],
-            metadata={
-                "resume": str(use_resume),
-                "conversation_turn": str(turn),
-            },
+            metadata=_otel_metadata,
         )
         _otel_ctx.__enter__()
 
@@ -1904,6 +2291,30 @@ async def stream_chat_completion_sdk(
             transcript_msg_count,
             session_id,
         )
+        # On the first turn inject user context into the message instead of the
+        # system prompt — the system prompt is now static (same for all users)
+        # so the LLM can cache it across sessions.
+        # current_message is updated so the transcript and session.messages also
+        # store the prefixed content, preserving personalisation across turns and
+        # on --resume.
+        if not has_history and understanding:
+            user_ctx = format_understanding_for_prompt(understanding)
+            prefixed_message = (
+                f"<user_context>\n{user_ctx}\n</user_context>\n\n{current_message}"
+            )
+            current_message = prefixed_message
+            query_message = prefixed_message
+            # Persist the prefixed content so resumed sessions retain the context.
+            # The user message was already saved to DB before context injection;
+            # update the DB record so the prefixed content survives page reload
+            # and --resume (the save at line ~1926 used the un-prefixed content).
+            for idx, session_msg in enumerate(session.messages):
+                if session_msg.role == "user":
+                    session_msg.content = prefixed_message
+                    await update_message_content_by_sequence(
+                        session_id, idx, prefixed_message
+                    )
+                    break
         # If files are attached, prepare them: images become vision
         # content blocks in the user message, other files go to sdk_cwd.
         attachments = await _prepare_file_attachments(
@@ -1935,7 +2346,16 @@ async def stream_chat_completion_sdk(
         # ---------------------------------------------------------------
         ended_with_stream_error = False
         attempts_exhausted = False
+        transient_exhausted = False
         stream_err: Exception | None = None
+
+        transient_retries = 0
+        max_transient_retries = config.claude_agent_max_transient_retries
+        # Preserved across transient retries so the fallback-model notification
+        # is not lost when a retry resets local per-attempt variables.  Reset
+        # only on context-level attempt changes (same guard as transient_retries).
+        fallback_model_activated_per_attempt = False
+        fallback_notified_per_attempt = False
 
         state = _RetryState(
             options=options,
@@ -1949,7 +2369,21 @@ async def stream_chat_completion_sdk(
             usage=_TokenUsage(),
         )
 
-        for attempt in range(_MAX_STREAM_ATTEMPTS):
+        attempt = 0
+        _last_reset_attempt = -1
+        while attempt < _MAX_STREAM_ATTEMPTS:
+            # Reset transient retry counter per context-level attempt so
+            # each attempt (original, compacted, no-transcript) gets the
+            # full retry budget for transient errors.
+            # Only reset when the attempt number actually changes —
+            # transient retries `continue` back to the loop top without
+            # incrementing `attempt`, so resetting unconditionally would
+            # create an infinite retry loop.
+            if attempt != _last_reset_attempt:
+                transient_retries = 0
+                fallback_model_activated_per_attempt = False
+                fallback_notified_per_attempt = False
+                _last_reset_attempt = attempt
             # Clear any stale stash signal from the previous attempt so
             # wait_for_stash() doesn't fire prematurely on a leftover event.
             reset_stash_event()
@@ -2004,17 +2438,33 @@ async def stream_chat_completion_sdk(
                 state.usage.reset()
 
             pre_attempt_msg_count = len(session.messages)
+            # Snapshot transcript builder state — it maintains an
+            # independent _entries list from session.messages, so rolling
+            # back session.messages alone would leave duplicate entries
+            # from the failed attempt in the uploaded transcript.
+            transcript_snap = state.transcript_builder.snapshot()
             events_yielded = 0
 
             try:
                 async for event in _run_stream_attempt(stream_ctx, state):
-                    if not isinstance(event, StreamHeartbeat):
+                    if not isinstance(event, _EPHEMERAL_EVENT_TYPES):
                         events_yielded += 1
+                    # Emit a one-time StreamStatus when the SDK switches
+                    # to the fallback model (detected via stderr).  The flag
+                    # is preserved across transient retries (reset only on
+                    # context-level attempt change) so the notification is
+                    # not lost if the activation occurs during a failed sub-
+                    # attempt that later retries successfully.
+                    if (
+                        fallback_model_activated_per_attempt
+                        and not fallback_notified_per_attempt
+                    ):
+                        fallback_notified_per_attempt = True
+                        yield StreamStatus(
+                            message="Primary model overloaded — "
+                            "using fallback model for this request"
+                        )
                     yield event
-                # Cancel any pre-launched tasks that were never dispatched
-                # by the SDK (e.g. edge-case SDK behaviour changes). Symmetric
-                # with the three error-path await cancel_pending_tool_tasks() calls.
-                await cancel_pending_tool_tasks()
                 break  # Stream completed — exit retry loop
             except asyncio.CancelledError:
                 logger.warning(
@@ -2023,9 +2473,6 @@ async def stream_chat_completion_sdk(
                     attempt + 1,
                     _MAX_STREAM_ATTEMPTS,
                 )
-                # Cancel any pre-launched tasks so they don't continue executing
-                # against a rolled-back or abandoned session.
-                await cancel_pending_tool_tasks()
                 raise
             except _HandledStreamError as exc:
                 # _run_stream_attempt already yielded a StreamError and
@@ -2033,6 +2480,28 @@ async def stream_chat_completion_sdk(
                 # session messages and set the error flag — do NOT set
                 # stream_err so the post-loop code won't emit a
                 # duplicate StreamError.
+                session.messages = session.messages[:pre_attempt_msg_count]
+                state.transcript_builder.restore(transcript_snap)
+                # Check if this is a transient error we can retry with backoff.
+                # exc.code is the only reliable signal — str(exc) is always the
+                # static "Stream error handled — StreamError already yielded" message.
+                if exc.code == "transient_api_error":
+                    backoff, transient_retries = _next_transient_backoff(
+                        events_yielded, transient_retries, max_transient_retries
+                    )
+                    if backoff is not None:
+                        logger.warning(
+                            "%s Transient error — retrying in %ds (%d/%d)",
+                            log_prefix,
+                            backoff,
+                            transient_retries,
+                            max_transient_retries,
+                        )
+                        async for evt in _do_transient_backoff(
+                            backoff, state, message_id, session_id
+                        ):
+                            yield evt
+                        continue  # retry the same context-level attempt
                 logger.warning(
                     "%s Stream error handled in attempt "
                     "(attempt %d/%d, code=%s, events_yielded=%d)",
@@ -2042,7 +2511,6 @@ async def stream_chat_completion_sdk(
                     exc.code or "transient",
                     events_yielded,
                 )
-                session.messages = session.messages[:pre_attempt_msg_count]
                 # transcript_builder still contains entries from the aborted
                 # attempt that no longer match session.messages.  Skip upload
                 # so a future --resume doesn't replay rolled-back content.
@@ -2057,27 +2525,36 @@ async def stream_chat_completion_sdk(
                     retryable=True,
                 )
                 ended_with_stream_error = True
-                # Cancel any pre-launched tasks from the failed attempt.
-                await cancel_pending_tool_tasks()
+                # For transient errors the StreamError was deliberately NOT
+                # yielded inside _run_stream_attempt (already_yielded=False)
+                # so the client didn't see a premature error flash.  Yield it
+                # now that we know retries are exhausted.
+                # For non-transient errors (circuit breaker, idle timeout)
+                # already_yielded=True — do NOT yield again.
+                if not exc.already_yielded:
+                    yield StreamError(
+                        errorText=exc.error_msg or FRIENDLY_TRANSIENT_MSG,
+                        code=exc.code or "transient_api_error",
+                    )
                 break
             except Exception as e:
                 stream_err = e
                 is_context_error = _is_prompt_too_long(e)
+                is_transient = is_transient_api_error(str(e))
                 logger.warning(
                     "%s Stream error (attempt %d/%d, context_error=%s, "
-                    "events_yielded=%d): %s",
+                    "transient=%s, events_yielded=%d): %s",
                     log_prefix,
                     attempt + 1,
                     _MAX_STREAM_ATTEMPTS,
                     is_context_error,
+                    is_transient,
                     events_yielded,
                     stream_err,
                     exc_info=True,
                 )
                 session.messages = session.messages[:pre_attempt_msg_count]
-                # Cancel any pre-launched tasks from the failed attempt so they
-                # don't continue executing against the rolled-back session.
-                await cancel_pending_tool_tasks()
+                state.transcript_builder.restore(transcript_snap)
                 if events_yielded > 0:
                     # Events were already sent to the frontend and cannot be
                     # unsent.  Retrying would produce duplicate/inconsistent
@@ -2090,16 +2567,48 @@ async def stream_chat_completion_sdk(
                     skip_transcript_upload = True
                     ended_with_stream_error = True
                     break
+                # Transient API errors (ECONNRESET, 429, 5xx) — retry
+                # with exponential backoff via the shared helper.
+                if is_transient:
+                    backoff, transient_retries = _next_transient_backoff(
+                        events_yielded, transient_retries, max_transient_retries
+                    )
+                    if backoff is not None:
+                        logger.warning(
+                            "%s Transient exception — retrying in %ds (%d/%d)",
+                            log_prefix,
+                            backoff,
+                            transient_retries,
+                            max_transient_retries,
+                        )
+                        async for evt in _do_transient_backoff(
+                            backoff, state, message_id, session_id
+                        ):
+                            yield evt
+                        continue  # retry same context-level attempt
+                    # Retries exhausted — persist retryable marker so the
+                    # frontend shows "Try again" after refresh.
+                    # Mirrors the _HandledStreamError exhausted-retry path
+                    # at line ~2310.
+                    transient_exhausted = True
+                    skip_transcript_upload = True
+                    _append_error_marker(
+                        session, FRIENDLY_TRANSIENT_MSG, retryable=True
+                    )
+                    ended_with_stream_error = True
+                    break
+
                 if not is_context_error:
-                    # Non-context errors (network, auth, rate-limit) should
-                    # not trigger compaction — surface the error immediately.
+                    # Non-context, non-transient errors (auth, fatal)
+                    # should not trigger compaction — surface immediately.
                     skip_transcript_upload = True
                     ended_with_stream_error = True
                     break
+                attempt += 1  # advance to next context-level attempt
                 continue
         else:
-            # All retry attempts exhausted (loop ended without break)
-            # skip_transcript_upload is already set by _reduce_context
+            # while condition became False — all attempts exhausted without
+            # break.  skip_transcript_upload is already set by _reduce_context
             # when the transcript was dropped (transcript_lost=True).
             ended_with_stream_error = True
             attempts_exhausted = True
@@ -2128,25 +2637,24 @@ async def stream_chat_completion_sdk(
                 yield response
 
         if ended_with_stream_error and stream_err is not None:
-            # Use distinct error codes: "all_attempts_exhausted" when all
-            # retries were consumed vs "sdk_stream_error" for non-context
-            # errors that broke the loop immediately (network, auth, etc.).
+            # Use distinct error codes depending on how the loop ended:
+            # • "all_attempts_exhausted" — context compaction ran out of room
+            # • "transient_api_error" — 429/5xx/ECONNRESET retries exhausted
+            # • "sdk_stream_error" — non-context, non-transient fatal error
             safe_err = str(stream_err).replace("\n", " ").replace("\r", "")[:500]
             if attempts_exhausted:
                 error_text = (
                     "Your conversation is too long. "
                     "Please start a new chat or clear some history."
                 )
+                error_code = "all_attempts_exhausted"
+            elif transient_exhausted:
+                error_text = FRIENDLY_TRANSIENT_MSG
+                error_code = "transient_api_error"
             else:
                 error_text = _friendly_error_text(safe_err)
-            yield StreamError(
-                errorText=error_text,
-                code=(
-                    "all_attempts_exhausted"
-                    if attempts_exhausted
-                    else "sdk_stream_error"
-                ),
-            )
+                error_code = "sdk_stream_error"
+            yield StreamError(errorText=error_text, code=error_code)
 
         # Copy token usage from retry state to outer-scope accumulators
         # so the finally block can persist them.
@@ -2248,8 +2756,26 @@ async def stream_chat_completion_sdk(
 
         raise
     finally:
-        # --- Close OTEL context ---
+        # --- Close OTEL context (with cost attributes) ---
         if _otel_ctx is not None:
+            try:
+                span = otel_trace.get_current_span()
+                if span and span.is_recording():
+                    span.set_attribute("gen_ai.usage.prompt_tokens", turn_prompt_tokens)
+                    span.set_attribute(
+                        "gen_ai.usage.completion_tokens", turn_completion_tokens
+                    )
+                    span.set_attribute(
+                        "gen_ai.usage.cache_read_tokens", turn_cache_read_tokens
+                    )
+                    span.set_attribute(
+                        "gen_ai.usage.cache_creation_tokens",
+                        turn_cache_creation_tokens,
+                    )
+                    if turn_cost_usd is not None:
+                        span.set_attribute("gen_ai.usage.cost_usd", turn_cost_usd)
+            except Exception:
+                logger.debug("Failed to set OTEL cost attributes", exc_info=True)
             try:
                 _otel_ctx.__exit__(*sys.exc_info())
             except Exception:
@@ -2267,6 +2793,8 @@ async def stream_chat_completion_sdk(
             cache_creation_tokens=turn_cache_creation_tokens,
             log_prefix=log_prefix,
             cost_usd=turn_cost_usd,
+            model=config.model,
+            provider="anthropic",
         )
 
         # --- Persist session messages ---
@@ -2300,6 +2828,16 @@ async def stream_chat_completion_sdk(
             task = asyncio.create_task(pause_sandbox_direct(e2b_sandbox, session_id))
             _background_tasks.add(task)
             task.add_done_callback(_background_tasks.discard)
+
+        # --- Graphiti: ingest conversation turn for temporal memory ---
+        if graphiti_enabled and user_id and message and is_user_message:
+            from backend.copilot.graphiti.ingest import enqueue_conversation_turn
+
+            _ingest_task = asyncio.create_task(
+                enqueue_conversation_turn(user_id, session_id, message)
+            )
+            _background_tasks.add(_ingest_task)
+            _ingest_task.add_done_callback(_background_tasks.discard)
 
         # --- Upload transcript for next-turn --resume ---
         # TranscriptBuilder is the single source of truth.  It mirrors the
@@ -2371,18 +2909,3 @@ async def stream_chat_completion_sdk(
         finally:
             # Release stream lock to allow new streams for this session
             await lock.release()
-
-
-async def _update_title_async(
-    session_id: str, message: str, user_id: str | None = None
-) -> None:
-    """Background task to update session title."""
-    try:
-        title = await _generate_session_title(
-            message, user_id=user_id, session_id=session_id
-        )
-        if title and user_id:
-            await update_session_title(session_id, user_id, title, only_if_empty=True)
-            logger.debug("[SDK] Generated title for %s: %s", session_id, title)
-    except Exception as e:
-        logger.warning("[SDK] Failed to update session title: %s", e)
