@@ -27,7 +27,6 @@ from opentelemetry import trace as otel_trace
 
 from backend.copilot.config import CopilotMode
 from backend.copilot.context import get_workspace_manager, set_execution_context
-from backend.copilot.db import update_message_content_by_sequence
 from backend.copilot.graphiti.config import is_enabled_for_user
 from backend.copilot.model import (
     ChatMessage,
@@ -53,10 +52,11 @@ from backend.copilot.response_model import (
     StreamUsage,
 )
 from backend.copilot.service import (
-    _build_cacheable_system_prompt,
+    _build_system_prompt,
     _get_openai_client,
     _update_title_async,
     config,
+    inject_user_context,
 )
 from backend.copilot.token_tracking import persist_and_record_usage
 from backend.copilot.tools import execute_tool, get_available_tools
@@ -70,7 +70,6 @@ from backend.copilot.transcript import (
     validate_transcript,
 )
 from backend.copilot.transcript_builder import TranscriptBuilder
-from backend.data.understanding import format_understanding_for_prompt
 from backend.util.exceptions import NotFoundError
 from backend.util.prompt import (
     compress_context,
@@ -965,9 +964,9 @@ async def stream_chat_completion_baseline(
     # a needless DB lookup for user understanding.
     should_inject_user_context = is_first_turn and is_user_message
     if should_inject_user_context:
-        prompt_task = _build_cacheable_system_prompt(user_id)
+        prompt_task = _build_system_prompt(user_id)
     else:
-        prompt_task = _build_cacheable_system_prompt(None)
+        prompt_task = _build_system_prompt(None)
 
     # Run download + prompt build concurrently — both are independent I/O
     # on the request critical path.
@@ -1051,30 +1050,15 @@ async def stream_chat_completion_baseline(
     # Inject user context into the first user message on first turn.
     # Done before attachment/URL injection so the context prefix lands at
     # the very start of the message content.
-    # The prefixed content is also stored back into session.messages and the
-    # transcript so that resumed sessions and the transcript both carry the
-    # personalisation beyond the first request.
     user_message_for_transcript = message
     if should_inject_user_context and understanding:
-        user_ctx = format_understanding_for_prompt(understanding)
-        prefixed: str | None = None
-        for msg in openai_messages:
-            if msg["role"] == "user":
-                prefixed = (
-                    f"<user_context>\n{user_ctx}\n</user_context>\n\n{msg['content']}"
-                )
-                msg["content"] = prefixed
-                break
+        prefixed = await inject_user_context(
+            understanding, message or "", session_id, session.messages
+        )
         if prefixed is not None:
-            # Persist the prefixed content so subsequent turns and --resume
-            # retain the user context.
-            # The user message was already saved to DB before context injection
-            # (at ~line 932); update the DB record so the prefixed content
-            # survives page reload.
-            for idx, session_msg in enumerate(session.messages):
-                if session_msg.role == "user":
-                    session_msg.content = prefixed
-                    await update_message_content_by_sequence(session_id, idx, prefixed)
+            for msg in openai_messages:
+                if msg["role"] == "user":
+                    msg["content"] = prefixed
                     break
             user_message_for_transcript = prefixed
         else:

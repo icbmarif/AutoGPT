@@ -1,7 +1,8 @@
 """CoPilot service — shared helpers used by both SDK and baseline paths.
 
 This module contains:
-- System prompt building (Langfuse + default fallback)
+- System prompt building (Langfuse + static fallback, cache-optimised)
+- User context injection (prepends <user_context> to first user message)
 - Session title generation
 - Session assignment
 - Shared config and client instances
@@ -22,7 +23,9 @@ from backend.util.exceptions import NotAuthorizedError, NotFoundError
 from backend.util.settings import AppEnvironment, Settings
 
 from .config import ChatConfig
+from .db import update_message_content_by_sequence
 from .model import (
+    ChatMessage,
     ChatSessionInfo,
     get_chat_session,
     update_session_title,
@@ -52,24 +55,6 @@ def _get_langfuse():
     return _langfuse
 
 
-# Default system prompt used when Langfuse is not configured
-# Provides minimal baseline tone and personality - all workflow, tools, and
-# technical details are provided via the supplement.
-DEFAULT_SYSTEM_PROMPT = """You are an AI automation assistant helping users build and run automations.
-
-Here is everything you know about the current user from previous interactions:
-
-<users_information>
-{users_information}
-</users_information>
-
-Your goal is to help users automate tasks by:
-- Understanding their needs and business context
-- Building and running working automations
-- Delivering tangible value through action, not just explanation
-
-Be concise, proactive, and action-oriented. Bias toward showing working solutions over lengthy explanations."""
-
 # Static system prompt for token caching — identical for all users.
 # User-specific context is injected into the first user message instead,
 # so the system prompt never changes and can be cached across all sessions.
@@ -98,82 +83,40 @@ def _is_langfuse_configured() -> bool:
     )
 
 
-async def _get_system_prompt_template(context: str) -> str:
-    """Get the system prompt, trying Langfuse first with fallback to default.
+async def _fetch_langfuse_prompt() -> str | None:
+    """Fetch the static system prompt from Langfuse.
 
-    Args:
-        context: The user context/information to compile into the prompt.
-
-    Returns:
-        The compiled system prompt string.
+    Returns the compiled prompt string, or None if Langfuse is unconfigured
+    or the fetch fails. Passes an empty users_information placeholder so the
+    prompt text is identical across all users (enabling cross-session caching).
     """
-    if _is_langfuse_configured():
-        try:
-            # Use asyncio.to_thread to avoid blocking the event loop
-            # In non-production environments, fetch the latest prompt version
-            # instead of the production-labeled version for easier testing
-            label = (
-                None
-                if settings.config.app_env == AppEnvironment.PRODUCTION
-                else "latest"
-            )
-            prompt = await asyncio.to_thread(
-                _get_langfuse().get_prompt,
-                config.langfuse_prompt_name,
-                label=label,
-                cache_ttl_seconds=config.langfuse_prompt_cache_ttl,
-            )
-            return prompt.compile(users_information=context)
-        except Exception as e:
-            logger.warning(f"Failed to fetch prompt from Langfuse, using default: {e}")
-
-    # Fallback to default prompt
-    return DEFAULT_SYSTEM_PROMPT.format(users_information=context)
+    if not _is_langfuse_configured():
+        return None
+    try:
+        label = (
+            None if settings.config.app_env == AppEnvironment.PRODUCTION else "latest"
+        )
+        prompt = await asyncio.to_thread(
+            _get_langfuse().get_prompt,
+            config.langfuse_prompt_name,
+            label=label,
+            cache_ttl_seconds=config.langfuse_prompt_cache_ttl,
+        )
+        return prompt.compile(users_information="")
+    except Exception as e:
+        logger.warning(f"Failed to fetch prompt from Langfuse, using default: {e}")
+        return None
 
 
 async def _build_system_prompt(
-    user_id: str | None, has_conversation_history: bool = False
-) -> tuple[str, Any]:
-    """Build the full system prompt including business understanding if available.
-
-    Args:
-        user_id: The user ID for fetching business understanding.
-        has_conversation_history: Whether there's existing conversation history.
-            If True, we don't tell the model to greet/introduce (since they're
-            already in a conversation).
-
-    Returns:
-        Tuple of (compiled prompt string, business understanding object)
-    """
-    # If user is authenticated, try to fetch their business understanding
-    understanding = None
-    if user_id:
-        try:
-            understanding = await understanding_db().get_business_understanding(user_id)
-        except Exception as e:
-            logger.warning(f"Failed to fetch business understanding: {e}")
-            understanding = None
-
-    if understanding:
-        context = format_understanding_for_prompt(understanding)
-    elif has_conversation_history:
-        context = "No prior understanding saved yet. Continue the existing conversation naturally."
-    else:
-        context = "This is the first time you are meeting the user. Greet them and introduce them to the platform"
-
-    compiled = await _get_system_prompt_template(context)
-    return compiled, understanding
-
-
-async def _build_cacheable_system_prompt(
     user_id: str | None,
 ) -> tuple[str, Any]:
     """Build a fully static system prompt suitable for LLM token caching.
 
-    Unlike _build_system_prompt, user-specific context is NOT embedded here.
-    Callers must inject the returned understanding into the first user message
-    via format_understanding_for_prompt() so the system prompt stays identical
-    across all users and sessions, enabling cross-session cache hits.
+    User-specific context is NOT embedded here. Callers must inject the
+    returned understanding into the first user message via inject_user_context()
+    so the system prompt stays identical across all users and sessions,
+    enabling cross-session cache hits.
 
     Returns:
         Tuple of (static_prompt, understanding_object_or_None)
@@ -185,28 +128,33 @@ async def _build_cacheable_system_prompt(
         except Exception as e:
             logger.warning(f"Failed to fetch business understanding: {e}")
 
-    if _is_langfuse_configured():
-        try:
-            label = (
-                None
-                if settings.config.app_env == AppEnvironment.PRODUCTION
-                else "latest"
-            )
-            prompt = await asyncio.to_thread(
-                _get_langfuse().get_prompt,
-                config.langfuse_prompt_name,
-                label=label,
-                cache_ttl_seconds=config.langfuse_prompt_cache_ttl,
-            )
-            # Pass empty string so existing Langfuse templates stay static
-            compiled = prompt.compile(users_information="")
-            return compiled, understanding
-        except Exception as e:
-            logger.warning(
-                f"Failed to fetch cacheable prompt from Langfuse, using default: {e}"
-            )
+    prompt = await _fetch_langfuse_prompt() or _CACHEABLE_SYSTEM_PROMPT
+    return prompt, understanding
 
-    return _CACHEABLE_SYSTEM_PROMPT, understanding
+
+async def inject_user_context(
+    understanding: Any,
+    message: str,
+    session_id: str,
+    session_messages: list[ChatMessage],
+) -> str | None:
+    """Prepend a <user_context> block to the first user message.
+
+    Updates the in-memory session_messages list and persists the prefixed
+    content to the DB so resumed sessions and page reloads retain
+    personalisation.
+
+    Returns:
+        The prefixed message string, or None if no user message was found.
+    """
+    user_ctx = format_understanding_for_prompt(understanding)
+    prefixed = f"<user_context>\n{user_ctx}\n</user_context>\n\n{message}"
+    for idx, session_msg in enumerate(session_messages):
+        if session_msg.role == "user":
+            session_msg.content = prefixed
+            await update_message_content_by_sequence(session_id, idx, prefixed)
+            return prefixed
+    return None
 
 
 async def _generate_session_title(

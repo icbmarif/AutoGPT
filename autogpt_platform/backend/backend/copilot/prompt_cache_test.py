@@ -1,6 +1,6 @@
 """Unit tests for the cacheable system prompt building logic.
 
-These tests verify that _build_cacheable_system_prompt:
+These tests verify that _build_system_prompt:
 - Returns the static _CACHEABLE_SYSTEM_PROMPT when no user_id is given
 - Returns the static prompt + understanding when user_id is given
 - Falls through to _CACHEABLE_SYSTEM_PROMPT when Langfuse is not configured
@@ -15,17 +15,17 @@ import pytest
 _SVC = "backend.copilot.service"
 
 
-class TestBuildCacheableSystemPrompt:
+class TestBuildSystemPrompt:
     @pytest.mark.asyncio
     async def test_no_user_id_returns_static_prompt(self):
         """When user_id is None, no DB lookup happens and the static prompt is returned."""
         with (patch(f"{_SVC}._is_langfuse_configured", return_value=False),):
             from backend.copilot.service import (
                 _CACHEABLE_SYSTEM_PROMPT,
-                _build_cacheable_system_prompt,
+                _build_system_prompt,
             )
 
-            prompt, understanding = await _build_cacheable_system_prompt(None)
+            prompt, understanding = await _build_system_prompt(None)
 
         assert prompt == _CACHEABLE_SYSTEM_PROMPT
         assert understanding is None
@@ -43,10 +43,10 @@ class TestBuildCacheableSystemPrompt:
         ):
             from backend.copilot.service import (
                 _CACHEABLE_SYSTEM_PROMPT,
-                _build_cacheable_system_prompt,
+                _build_system_prompt,
             )
 
-            prompt, understanding = await _build_cacheable_system_prompt("user-123")
+            prompt, understanding = await _build_system_prompt("user-123")
 
         assert prompt == _CACHEABLE_SYSTEM_PROMPT
         assert understanding is fake_understanding
@@ -66,10 +66,10 @@ class TestBuildCacheableSystemPrompt:
         ):
             from backend.copilot.service import (
                 _CACHEABLE_SYSTEM_PROMPT,
-                _build_cacheable_system_prompt,
+                _build_system_prompt,
             )
 
-            prompt, understanding = await _build_cacheable_system_prompt("user-456")
+            prompt, understanding = await _build_system_prompt("user-456")
 
         assert prompt == _CACHEABLE_SYSTEM_PROMPT
         assert understanding is None
@@ -96,9 +96,9 @@ class TestBuildCacheableSystemPrompt:
                 f"{_SVC}.asyncio.to_thread", new=AsyncMock(return_value=mock_prompt_obj)
             ),
         ):
-            from backend.copilot.service import _build_cacheable_system_prompt
+            from backend.copilot.service import _build_system_prompt
 
-            prompt, understanding = await _build_cacheable_system_prompt("user-789")
+            prompt, understanding = await _build_system_prompt("user-789")
 
         assert prompt == langfuse_prompt_text
         assert understanding is fake_understanding
@@ -120,10 +120,10 @@ class TestBuildCacheableSystemPrompt:
         ):
             from backend.copilot.service import (
                 _CACHEABLE_SYSTEM_PROMPT,
-                _build_cacheable_system_prompt,
+                _build_system_prompt,
             )
 
-            prompt, understanding = await _build_cacheable_system_prompt("user-000")
+            prompt, understanding = await _build_system_prompt("user-000")
 
         assert prompt == _CACHEABLE_SYSTEM_PROMPT
         assert understanding is None
