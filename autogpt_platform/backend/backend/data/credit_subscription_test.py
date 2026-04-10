@@ -321,6 +321,111 @@ async def test_sync_subscription_from_stripe_business_tier():
 
 
 @pytest.mark.asyncio
+async def test_sync_subscription_from_stripe_cancels_stale_subs():
+    """When a new subscription becomes active, older active subs are cancelled.
+
+    Covers the paid-to-paid upgrade case (e.g. PRO → BUSINESS) where Stripe
+    Checkout creates a new subscription without touching the previous one,
+    leaving the customer double-billed.
+    """
+    mock_user = MagicMock(spec=User)
+    mock_user.id = "user-1"
+    stripe_sub = {
+        "id": "sub_new",
+        "customer": "cus_123",
+        "status": "active",
+        "items": {"data": [{"price": {"id": "price_biz_monthly"}}]},
+    }
+
+    async def mock_price_id(tier: SubscriptionTier) -> str | None:
+        if tier == SubscriptionTier.PRO:
+            return "price_pro_monthly"
+        if tier == SubscriptionTier.BUSINESS:
+            return "price_biz_monthly"
+        return None
+
+    existing = MagicMock()
+    existing.auto_paging_iter.return_value = iter(
+        [{"id": "sub_old"}, {"id": "sub_new"}]
+    )
+
+    with (
+        patch(
+            "backend.data.credit.User.prisma",
+            return_value=MagicMock(find_first=AsyncMock(return_value=mock_user)),
+        ),
+        patch(
+            "backend.data.credit.get_subscription_price_id",
+            side_effect=mock_price_id,
+        ),
+        patch(
+            "backend.data.credit.stripe.Subscription.list",
+            return_value=existing,
+        ),
+        patch(
+            "backend.data.credit.stripe.Subscription.cancel",
+        ) as mock_cancel,
+        patch(
+            "backend.data.credit.set_subscription_tier", new_callable=AsyncMock
+        ) as mock_set,
+    ):
+        await sync_subscription_from_stripe(stripe_sub)
+        mock_set.assert_awaited_once_with("user-1", SubscriptionTier.BUSINESS)
+        # Only the stale sub should be cancelled — never the new one.
+        mock_cancel.assert_called_once_with("sub_old")
+
+
+@pytest.mark.asyncio
+async def test_sync_subscription_from_stripe_stale_cancel_errors_swallowed():
+    """Errors cancelling stale subs must not block DB tier update for new sub."""
+    import stripe as stripe_mod
+
+    mock_user = MagicMock(spec=User)
+    mock_user.id = "user-1"
+    stripe_sub = {
+        "id": "sub_new",
+        "customer": "cus_123",
+        "status": "active",
+        "items": {"data": [{"price": {"id": "price_pro_monthly"}}]},
+    }
+
+    async def mock_price_id(tier: SubscriptionTier) -> str | None:
+        if tier == SubscriptionTier.PRO:
+            return "price_pro_monthly"
+        if tier == SubscriptionTier.BUSINESS:
+            return "price_biz_monthly"
+        return None
+
+    existing = MagicMock()
+    existing.auto_paging_iter.return_value = iter([{"id": "sub_old"}])
+
+    with (
+        patch(
+            "backend.data.credit.User.prisma",
+            return_value=MagicMock(find_first=AsyncMock(return_value=mock_user)),
+        ),
+        patch(
+            "backend.data.credit.get_subscription_price_id",
+            side_effect=mock_price_id,
+        ),
+        patch(
+            "backend.data.credit.stripe.Subscription.list",
+            return_value=existing,
+        ),
+        patch(
+            "backend.data.credit.stripe.Subscription.cancel",
+            side_effect=stripe_mod.StripeError("cancel failed"),
+        ),
+        patch(
+            "backend.data.credit.set_subscription_tier", new_callable=AsyncMock
+        ) as mock_set,
+    ):
+        # Must not raise — tier update proceeds even if cleanup cancel fails.
+        await sync_subscription_from_stripe(stripe_sub)
+        mock_set.assert_awaited_once_with("user-1", SubscriptionTier.PRO)
+
+
+@pytest.mark.asyncio
 async def test_get_subscription_price_id_pro():
     from backend.data.credit import get_subscription_price_id
 

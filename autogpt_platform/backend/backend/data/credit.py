@@ -1374,6 +1374,42 @@ async def sync_subscription_from_stripe(stripe_subscription: dict) -> None:
                 customer_id,
             )
             return
+        # When a new subscription becomes active (e.g. paid-to-paid tier upgrade
+        # via a fresh Checkout Session), cancel any OTHER active subscriptions
+        # for the same customer so the user isn't billed twice. We do this in
+        # the webhook rather than the API handler so that abandoning the
+        # checkout doesn't leave the user without a subscription.
+        new_sub_id = stripe_subscription.get("id", "")
+        if new_sub_id:
+            try:
+                other_subs = stripe.Subscription.list(
+                    customer=customer_id, status="active", limit=10
+                )
+                for sub in other_subs.auto_paging_iter():
+                    if sub["id"] == new_sub_id:
+                        continue
+                    try:
+                        stripe.Subscription.cancel(sub["id"])
+                        logger.info(
+                            "sync_subscription_from_stripe: cancelled stale sub %s"
+                            " for customer %s after new sub %s became active",
+                            sub["id"],
+                            customer_id,
+                            new_sub_id,
+                        )
+                    except stripe.StripeError:
+                        logger.warning(
+                            "sync_subscription_from_stripe: failed to cancel stale"
+                            " sub %s for customer %s",
+                            sub["id"],
+                            customer_id,
+                        )
+            except stripe.StripeError:
+                logger.warning(
+                    "sync_subscription_from_stripe: failed to list subs for"
+                    " customer %s while cleaning up stale subscriptions",
+                    customer_id,
+                )
     else:
         tier = SubscriptionTier.FREE
     await set_subscription_tier(user.id, tier)
