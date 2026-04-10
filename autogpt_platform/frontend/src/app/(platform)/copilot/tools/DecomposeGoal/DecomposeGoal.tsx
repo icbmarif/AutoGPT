@@ -68,9 +68,17 @@ interface EditableStep {
 interface Props {
   part: ToolUIPart;
   isLastMessage?: boolean;
+  // True while the parent assistant message is still streaming. We disable
+  // Approve/Modify in this window because the chat session is locked to
+  // the in-flight turn — sending a new user message would fail.
+  isMessageStreaming?: boolean;
 }
 
-export function DecomposeGoalTool({ part, isLastMessage }: Props) {
+export function DecomposeGoalTool({
+  part,
+  isLastMessage,
+  isMessageStreaming,
+}: Props) {
   const text = getAnimationText(part);
   const { onSend } = useCopilotChatActions();
 
@@ -87,6 +95,12 @@ export function DecomposeGoalTool({ part, isLastMessage }: Props) {
     !!output &&
     isDecompositionOutput(output) &&
     output.requires_approval;
+
+  // The Approve/Modify buttons are visible (so the user knows what's
+  // coming) but click-disabled while the assistant is still streaming
+  // its summary text after the tool call. The countdown ring keeps
+  // ticking so it stays in sync with the server-side timer.
+  const actionsEnabled = showActions && !isMessageStreaming;
 
   // Authoritative countdown comes from the backend tool response so the
   // server-side fallback timer and the client are guaranteed to agree.
@@ -181,14 +195,16 @@ export function DecomposeGoalTool({ part, isLastMessage }: Props) {
     return () => clearInterval(interval);
   }, [showActions, timerActive, part.toolCallId]);
 
-  // Auto-approve when countdown reaches 0 (only if timer is still active and actions visible).
-  // showActions prevents firing after isLastMessage changes (race condition guard).
+  // Auto-approve when countdown reaches 0 — but only after the assistant
+  // has finished streaming its summary text. Firing during streaming would
+  // hit the same locked-session failure as a manual click. If the timer
+  // hits 0 mid-stream, this effect re-runs when actionsEnabled flips true.
   // approve() is stable via approvedRef — safe to omit from deps.
   useEffect(() => {
-    if (secondsLeft === 0 && timerActive && showActions) {
+    if (secondsLeft === 0 && timerActive && actionsEnabled) {
       approve();
     }
-  }, [secondsLeft, timerActive, showActions]); // approve reads refs only — safe to omit
+  }, [secondsLeft, timerActive, actionsEnabled]); // approve reads refs only — safe to omit
 
   const progress = secondsLeft / countdownSeconds;
   const dashOffset = CIRCUMFERENCE * (1 - progress);
@@ -292,7 +308,11 @@ export function DecomposeGoalTool({ part, isLastMessage }: Props) {
             {showActions && (
               <div className="flex items-center gap-2 pt-1">
                 {isEditing ? (
-                  <Button variant="primary" onClick={approve}>
+                  <Button
+                    variant="primary"
+                    onClick={approve}
+                    disabled={!actionsEnabled}
+                  >
                     <span className="inline-flex items-center gap-1.5">
                       <CheckIcon size={14} weight="bold" />
                       Approve
@@ -301,7 +321,12 @@ export function DecomposeGoalTool({ part, isLastMessage }: Props) {
                 ) : (
                   <>
                     {/* Primary CTA — encourages user to run the agent */}
-                    <Button variant="primary" size="small" onClick={approve}>
+                    <Button
+                      variant="primary"
+                      size="small"
+                      onClick={approve}
+                      disabled={!actionsEnabled}
+                    >
                       <span className="group/label inline-flex items-center gap-2">
                         <span className="inline-flex items-center gap-1.5 group-hover/label:hidden">
                           Starting in
@@ -344,7 +369,12 @@ export function DecomposeGoalTool({ part, isLastMessage }: Props) {
                         </span>
                       </span>
                     </Button>
-                    <Button variant="ghost" size="small" onClick={handleModify}>
+                    <Button
+                      variant="ghost"
+                      size="small"
+                      onClick={handleModify}
+                      disabled={!actionsEnabled}
+                    >
                       <span className="inline-flex items-center gap-1.5">
                         <PencilSimpleIcon size={14} weight="bold" />
                         Modify

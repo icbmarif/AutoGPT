@@ -95,6 +95,7 @@ interface Props {
   partIndex: number;
   onRetry?: () => void;
   isLastMessage?: boolean;
+  isMessageStreaming?: boolean;
 }
 
 export function MessagePartRenderer({
@@ -103,6 +104,7 @@ export function MessagePartRenderer({
   partIndex,
   onRetry,
   isLastMessage,
+  isMessageStreaming,
 }: Props) {
   const key = `${messageID}-${partIndex}`;
 
@@ -176,6 +178,7 @@ export function MessagePartRenderer({
           key={key}
           part={part as ToolUIPart}
           isLastMessage={isLastMessage}
+          isMessageStreaming={isMessageStreaming}
         />
       );
     case "tool-create_agent":

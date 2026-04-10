@@ -51,6 +51,7 @@ function renderSegments(
   messageID: string,
   onRetry?: () => void,
   isLastMessage?: boolean,
+  isMessageStreaming?: boolean,
 ): React.ReactNode[] {
   return segments.map((seg, segIdx) => {
     if (seg.kind === "collapsed-group") {
@@ -64,6 +65,7 @@ function renderSegments(
         partIndex={seg.index}
         onRetry={onRetry}
         isLastMessage={isLastMessage}
+        isMessageStreaming={isMessageStreaming}
       />
     );
   });
@@ -375,6 +377,7 @@ export function ChatMessagesContainer({
                       message.id,
                       isLastAssistant ? onRetry : undefined,
                       isLastAssistant,
+                      isCurrentlyStreaming,
                     )
                   : message.parts.map((part, i) => (
                       <MessagePartRenderer
@@ -384,6 +387,7 @@ export function ChatMessagesContainer({
                         partIndex={i}
                         onRetry={isLastAssistant ? onRetry : undefined}
                         isLastMessage={isLastAssistant}
+                        isMessageStreaming={isCurrentlyStreaming}
                       />
                     ))}
                 {isLastInTurn && !isCurrentlyStreaming && (
