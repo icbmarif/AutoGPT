@@ -1408,6 +1408,7 @@ model PlatformLink {
 
   @@unique([platform, platformServerId])
   @@index([userId])
+  @@index([platform, ownerPlatformUserId])
 }
 
 // Maps a platform user identity (a single Discord / Telegram / Slack user) to
