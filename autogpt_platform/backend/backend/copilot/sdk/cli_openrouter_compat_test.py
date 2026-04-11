@@ -57,6 +57,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -72,12 +73,40 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Substring of the `tool_reference` content block that breaks OpenRouter's
-# stricter Zod validation in tool_result.content. PR #12294 root-cause.
-_FORBIDDEN_TOOL_REFERENCE = '"type": "tool_reference"'
-
 # Beta string OpenRouter rejects in upstream issue #789. Can appear in
 # either `betas` arrays or the `anthropic-beta` header value.
 _FORBIDDEN_CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27"
+
+
+def _body_contains_tool_reference_block(body_text: str) -> bool:
+    """Return True if *body_text* contains a ``tool_reference`` content
+    block anywhere in its structure.
+
+    We parse the JSON and walk it rather than relying on substring
+    matches because the CLI is free to emit either ``{"type": "tool_reference"}``
+    (with spaces) or the compact ``{"type":"tool_reference"}`` form,
+    and we must catch both.  Falls back to a whitespace-tolerant
+    regex when the body isn't valid JSON — the Messages API always
+    sends JSON, but the fallback keeps the detector honest on
+    malformed / partial bodies a fuzzer might produce.
+    """
+    try:
+        payload = json.loads(body_text)
+    except (ValueError, TypeError):
+        # Whitespace-tolerant fallback: allow any whitespace between
+        # the key, colon, and value quoted string.
+        return bool(re.search(r'"type"\s*:\s*"tool_reference"', body_text))
+
+    def _walk(node: Any) -> bool:
+        if isinstance(node, dict):
+            if node.get("type") == "tool_reference":
+                return True
+            return any(_walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(_walk(v) for v in node)
+        return False
+
+    return _walk(payload)
 
 
 def _scan_request_for_forbidden_patterns(
@@ -90,7 +119,7 @@ def _scan_request_for_forbidden_patterns(
     OpenRouter-incompatible features.
     """
     findings: list[str] = []
-    if _FORBIDDEN_TOOL_REFERENCE in body_text:
+    if _body_contains_tool_reference_block(body_text):
         findings.append(
             "`tool_reference` content block in request body — "
             "PR #12294 / CLI 2.1.69 regression"
@@ -335,7 +364,15 @@ async def _run_cli_against_fake_server(
             proc.kill()
         except ProcessLookupError:
             pass
-        stdout_bytes, stderr_bytes = b"", b""
+        # Reap the process after kill() so we don't leave an unreaped
+        # child behind until event-loop shutdown. Wait with its own
+        # short timeout in case the kill was ineffective.
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(), timeout=5.0
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            stdout_bytes, stderr_bytes = b"", b""
 
     return (
         proc.returncode if proc.returncode is not None else -1,
@@ -501,6 +538,27 @@ class TestScanRequestForForbiddenPatterns:
         assert len(findings) == 2
         assert "tool_reference" in findings[0]
         assert "context-management-2025-06-27" in findings[1]
+
+    def test_detects_compact_tool_reference_without_spaces(self):
+        # Regression guard: the old substring matcher only caught the
+        # prettified form '"type": "tool_reference"' with a space
+        # between the key and the value, so a CLI emitting compact
+        # JSON (e.g. via `json.dumps(separators=(",", ":"))`) could
+        # slip past the scanner and false-pass. The JSON-walking
+        # detector catches both forms.
+        body = '{"messages":[{"role":"user","content":[{"type":"tool_reference","tool_name":"find"}]}]}'
+        findings = _scan_request_for_forbidden_patterns(body, {})
+        assert len(findings) == 1
+        assert "tool_reference" in findings[0]
+
+    def test_detects_tool_reference_in_malformed_body_fallback(self):
+        # When the body isn't valid JSON the helper falls back to a
+        # whitespace-tolerant regex so fuzzed / partial payloads are
+        # still caught.
+        body = 'garbage-prefix{"type"  :  "tool_reference"} trailing'
+        findings = _scan_request_for_forbidden_patterns(body, {})
+        assert len(findings) == 1
+        assert "tool_reference" in findings[0]
 
 
 class TestResolveCliPath:
