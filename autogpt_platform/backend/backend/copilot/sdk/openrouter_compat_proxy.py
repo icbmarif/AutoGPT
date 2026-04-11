@@ -62,7 +62,6 @@ import asyncio
 import json
 import logging
 from typing import Any
-from urllib.parse import urlparse
 
 import aiohttp
 from aiohttp import web
@@ -296,17 +295,15 @@ class OpenRouterCompatProxy:
             raise RuntimeError("Compat proxy server has no listening sockets.")
         self._port = sockets[0].getsockname()[1]
         self._runner = runner
-        # Log only the host of the upstream — never the full URL — so a
-        # base URL that happens to embed credentials (e.g. via a path
-        # token, though OpenRouter doesn't do this) cannot leak into
-        # logs.  CodeQL `py/clear-text-logging-sensitive-data` defends
-        # against this case.
-        upstream_host = urlparse(self._target_base_url).netloc or "<unknown>"
-        logger.info(
-            "OpenRouter compat proxy listening on 127.0.0.1:%d -> %s",
-            self._port,
-            upstream_host,
-        )
+        # Deliberately log only the local bind port — never the
+        # upstream URL or any derived component. CodeQL's
+        # `py/clear-text-logging-sensitive-data` taint analysis traces
+        # everything that originates from a config-supplied URL as
+        # potentially-sensitive even after parsing, and the upstream
+        # endpoint is anyway discoverable from the config the operator
+        # already has access to. The detailed upstream is exposed via
+        # the ``target_base_url`` property for callers that need it.
+        logger.info("OpenRouter compat proxy listening on 127.0.0.1:%d", self._port)
 
     async def stop(self) -> None:
         """Stop accepting connections and release the port."""
