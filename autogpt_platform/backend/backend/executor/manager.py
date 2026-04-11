@@ -708,6 +708,18 @@ class ExecutionProcessor:
                 )
                 if extra_cost > 0:
                     execution_stats.extra_cost += extra_cost
+                    # Mirror the low-balance notification path in
+                    # ``charge_node_usage`` so users are alerted when
+                    # their balance crosses the threshold from these
+                    # extra-iteration charges (sentry HIGH/MEDIUM bug
+                    # PRRT_kwDOJKSTjM56Mibw).
+                    await asyncio.to_thread(
+                        self._handle_low_balance,
+                        get_db_client(),
+                        node_exec.user_id,
+                        remaining_balance,
+                        extra_cost,
+                    )
             except InsufficientBalanceError as e:
                 log_metadata.error(
                     "billing_leak: insufficient balance after "
