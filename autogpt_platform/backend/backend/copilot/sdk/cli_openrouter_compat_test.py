@@ -386,21 +386,17 @@ async def _run_cli_against_fake_server(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_cli_does_not_send_openrouter_incompatible_features(caplog):
-    """End-to-end OpenRouter compatibility reproduction.
+async def _run_reproduction(
+    *, route_through_proxy: bool
+) -> tuple[int, str, str, list[_CapturedRequest]]:
+    """Spawn the CLI against a fake Anthropic API and return what the
+    *upstream* (post-proxy if any) saw.
 
-    Spawns the bundled (or overridden) Claude Code CLI against a fake
-    Anthropic API server, captures every request body it sends, and
-    asserts that none of them contain the two known OpenRouter-breaking
-    features (`tool_reference` content blocks or the
-    `context-management-2025-06-27` beta header).
-
-    Why this matters: pinning the CLI version via
-    ``test_bundled_cli_version_is_known_good_against_openrouter`` only
-    catches accidental SDK bumps — it doesn't tell us *why* the new
-    version would fail.  This test reproduces the exact mechanism so
-    bisecting via CI commits gives an actionable signal.
+    When ``route_through_proxy`` is True, the CLI talks to the
+    ``OpenRouterCompatProxy`` and the proxy forwards to the fake
+    upstream. The fake upstream is what records the requests, so the
+    captured bodies are what OpenRouter would actually have received —
+    *after* the proxy's stripping pass.
     """
     cli_path = _resolve_cli_path()
     if cli_path is None or not cli_path.is_file():
@@ -411,28 +407,39 @@ async def test_cli_does_not_send_openrouter_incompatible_features(caplog):
         )
 
     captured: list[_CapturedRequest] = []
-    runner, port = await _start_fake_anthropic_server(captured)
+    upstream_runner, upstream_port = await _start_fake_anthropic_server(captured)
+
+    proxy = None
+    target_port = upstream_port
     try:
+        if route_through_proxy:
+            from backend.copilot.sdk.openrouter_compat_proxy import (
+                OpenRouterCompatProxy,
+            )
+
+            proxy = OpenRouterCompatProxy(
+                target_base_url=f"http://127.0.0.1:{upstream_port}"
+            )
+            await proxy.start()
+            # Pull the bound port out of the proxy URL.
+            target_port = int(proxy.local_url.rsplit(":", 1)[1])
+
         returncode, stdout, stderr = await _run_cli_against_fake_server(
             cli_path=cli_path,
-            fake_server_port=port,
+            fake_server_port=target_port,
             timeout_seconds=30.0,
         )
     finally:
-        await runner.cleanup()
+        if proxy is not None:
+            await proxy.stop()
+        await upstream_runner.cleanup()
 
-    # We don't assert the CLI's exit code — depending on the CLI version
-    # and what we send back, the CLI may exit non-zero after a single
-    # successful round-trip.  All we care about is that the captured
-    # request bodies don't contain the forbidden patterns.
-    logger.info(
-        "CLI exited rc=%d; captured %d requests; stdout=%d bytes; stderr=%d bytes",
-        returncode,
-        len(captured),
-        len(stdout),
-        len(stderr),
-    )
+    return returncode, stdout, stderr, captured
 
+
+def _assert_no_forbidden_patterns(
+    captured: list[_CapturedRequest], returncode: int, stderr: str
+) -> None:
     if not captured:
         pytest.skip(
             "Bundled CLI did not make any HTTP requests to the fake server "
@@ -456,10 +463,55 @@ async def test_cli_does_not_send_openrouter_incompatible_features(caplog):
         "`claude-agent-sdk` above 0.1.45. See "
         "https://github.com/Significant-Gravitas/AutoGPT/pull/12294 and "
         "https://github.com/anthropics/claude-agent-sdk-python/issues/789. "
-        "If you intended to upgrade, you must use a known-good CLI binary "
-        "via `claude_agent_cli_path` (env: `CLAUDE_AGENT_CLI_PATH` or "
-        "`CHAT_CLAUDE_AGENT_CLI_PATH`) instead of the bundled one."
+        "If you intended to upgrade, you must enable the in-process compat "
+        "proxy (`CLAUDE_AGENT_USE_COMPAT_PROXY=true` or the prefixed "
+        "`CHAT_CLAUDE_AGENT_USE_COMPAT_PROXY=true`) or use a known-good "
+        "CLI binary via `claude_agent_cli_path` (env: "
+        "`CLAUDE_AGENT_CLI_PATH` or `CHAT_CLAUDE_AGENT_CLI_PATH`)."
     )
+
+
+@pytest.mark.asyncio
+async def test_cli_does_not_send_openrouter_incompatible_features():
+    """End-to-end OpenRouter compatibility reproduction (bare CLI path).
+
+    Spawns the bundled (or overridden) Claude Code CLI against a fake
+    Anthropic API server WITHOUT the compat proxy in the loop, captures
+    every request body it sends, and asserts that none of them contain
+    the two known OpenRouter-breaking features.
+
+    On a clean SDK pin (0.1.45 or 0.1.47, bundled CLI 2.1.63 or 2.1.70)
+    this passes naturally.  On a broken pin (0.1.55+, bundled CLI 2.1.91+)
+    it fails — that failure IS the bisect signal we use to verify which
+    SDK versions need the workaround.
+    """
+    returncode, _stdout, stderr, captured = await _run_reproduction(
+        route_through_proxy=False
+    )
+    _assert_no_forbidden_patterns(captured, returncode, stderr)
+
+
+@pytest.mark.asyncio
+async def test_cli_via_compat_proxy_emits_clean_requests_to_upstream():
+    """End-to-end test for the compat proxy workaround.
+
+    Spawns the bundled CLI against an in-process fake Anthropic API
+    server WITH the ``OpenRouterCompatProxy`` in front, then asserts
+    that the *upstream* sees clean requests — no `tool_reference`
+    blocks, no `context-management-2025-06-27` beta header — even
+    when the bundled CLI itself would have sent them.
+
+    This is the regression guard for the proxy: if the proxy ever
+    stops stripping a known forbidden pattern, this test catches it.
+    On a SDK version where the bare CLI is already clean (0.1.45 /
+    0.1.47), the proxy is a no-op and the test passes trivially.
+    On a SDK version with the regression (0.1.55+), the test fails
+    if and only if the proxy fails to strip the pattern.
+    """
+    returncode, _stdout, stderr, captured = await _run_reproduction(
+        route_through_proxy=True
+    )
+    _assert_no_forbidden_patterns(captured, returncode, stderr)
 
 
 def test_subprocess_module_available():
