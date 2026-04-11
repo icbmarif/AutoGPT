@@ -2277,10 +2277,34 @@ async def stream_chat_completion_sdk(
             # feature is opt-in and documented as "OpenRouter
             # compatibility", so quietly no-oping on direct-Anthropic
             # sessions is the safe default.
-            target_base_url: str | None = (sdk_env or {}).get(
-                "ANTHROPIC_BASE_URL"
-            ) or os.environ.get("ANTHROPIC_BASE_URL")
-            if not target_base_url and config.openrouter_active:
+            # Claude Code subscription mode intentionally sets
+            # ``sdk_env['ANTHROPIC_BASE_URL'] = ""`` to *disable* any
+            # base-URL override and keep the CLI talking to Anthropic
+            # directly. Treat an explicit empty string as a hard
+            # "no-proxy" signal so we never silently start the proxy
+            # against a host-wide ``ANTHROPIC_BASE_URL`` or fall back
+            # to OpenRouter when the caller has opted out.
+            sdk_env_map = sdk_env or {}
+            explicit_sdk_env = "ANTHROPIC_BASE_URL" in sdk_env_map
+            sdk_env_value = (
+                sdk_env_map["ANTHROPIC_BASE_URL"] if explicit_sdk_env else None
+            )
+            if explicit_sdk_env and not sdk_env_value:
+                # Empty string from sdk_env → subscription mode opt-out.
+                target_base_url: str | None = None
+                explicit_opt_out = True
+            else:
+                target_base_url = sdk_env_value or os.environ.get("ANTHROPIC_BASE_URL")
+                explicit_opt_out = False
+            # Only fall back to OpenRouter when the session actually
+            # has no base-URL plumbing of its own AND OpenRouter is
+            # the active routing provider AND the caller hasn't
+            # explicitly opted out via an empty sdk_env override.
+            if (
+                not target_base_url
+                and not explicit_opt_out
+                and config.openrouter_active
+            ):
                 from backend.util.clients import OPENROUTER_BASE_URL
 
                 target_base_url = OPENROUTER_BASE_URL
