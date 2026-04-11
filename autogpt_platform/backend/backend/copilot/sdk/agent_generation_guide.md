@@ -135,12 +135,14 @@ inputs or see outputs. NEVER skip them.
   output to the consuming block's input.
 - **Credentials**: Do NOT require credentials upfront. Users configure
   credentials later in the platform UI after the agent is saved.
-  When the user just needs to connect or update credentials for an
-  existing agent, do NOT call `create_agent` / `edit_agent` and do NOT
-  redirect them to the Builder — call `run_agent` (it surfaces the
-  inline credentials-setup card automatically) or `connect_integration`
-  (for a standalone setup card scoped to one provider). Both keep the
-  user in the chat.
+  When the user needs to connect credentials for an existing agent (never
+  connected, or credentials expired/invalidated), do NOT call
+  `create_agent` / `edit_agent` — call `run_agent` instead (it gates on
+  missing/invalid credentials before executing and surfaces the inline
+  setup card) or `connect_integration` (standalone setup card scoped to
+  one provider, no execution). When the user just wants to update or
+  swap credentials that are already valid, use `connect_integration` —
+  `run_agent` would execute the agent, not just update credentials.
 - **Node spacing**: Position nodes with at least 800 X-units between them.
 - **Nested properties**: Use `parentField_#_childField` notation in link
   sink_name/source_name to access nested object fields.
