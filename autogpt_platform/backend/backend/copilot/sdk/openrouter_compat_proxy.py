@@ -162,6 +162,9 @@ def strip_forbidden_betas_from_body(payload: Any) -> Any:
     """Remove forbidden tokens from the ``betas`` array of an
     Anthropic Messages API request body, if present.
 
+    Returns a shallow copy with the ``betas`` key cleaned — the input
+    dict is never mutated.
+
     The Messages API accepts a top-level ``betas: list[str]`` parameter
     used to opt into beta features.  We drop tokens in
     :data:`_FORBIDDEN_BETA_TOKENS` so OpenRouter's check passes.
@@ -169,15 +172,13 @@ def strip_forbidden_betas_from_body(payload: Any) -> Any:
     if not isinstance(payload, dict):
         return payload
     betas = payload.get("betas")
-    if isinstance(betas, list):
-        cleaned_betas = [b for b in betas if b not in _FORBIDDEN_BETA_TOKENS]
-        if cleaned_betas:
-            payload["betas"] = cleaned_betas
-        else:
-            # Drop the empty array entirely so OpenRouter doesn't even
-            # see an empty `betas` field.
-            payload.pop("betas", None)
-    return payload
+    if not isinstance(betas, list):
+        return payload
+    cleaned_betas = [b for b in betas if b not in _FORBIDDEN_BETA_TOKENS]
+    result = {k: v for k, v in payload.items() if k != "betas"}
+    if cleaned_betas:
+        result["betas"] = cleaned_betas
+    return result
 
 
 def strip_forbidden_anthropic_beta_header(value: str | None) -> str | None:
@@ -444,12 +445,18 @@ class OpenRouterCompatProxy:
         # ``/api/v1/v1/messages``.  Strip a leading ``/v1`` from the
         # incoming path if the target already ends with ``/v1`` (or
         # similar API-version segment).
+        # Deduplicate API version prefix: if the target URL already
+        # contains a versioned path segment (e.g. ``/api/v1``) and the
+        # incoming request path starts with the same segment, strip it
+        # to avoid ``/api/v1/v1/messages``.
+        from urllib.parse import urlparse
+
         target_base = self._target_base_url
-        target_lower = target_base.lower()
-        for prefix in ("/v1",):
-            if target_lower.endswith(prefix) and upstream_path.startswith(prefix + "/"):
-                upstream_path = upstream_path[len(prefix) :]
-                break
+        target_path = urlparse(target_base).path.rstrip("/")
+        if target_path and upstream_path.startswith(target_path + "/"):
+            upstream_path = upstream_path[len(target_path) :]
+        elif target_path and upstream_path == target_path:
+            upstream_path = "/"
         upstream_url = f"{target_base}{upstream_path}"
 
         body_bytes = await request.read()
