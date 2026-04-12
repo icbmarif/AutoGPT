@@ -463,7 +463,9 @@ class OpenRouterCompatProxy:
             raise
         except aiohttp.ClientError as e:
             stream_error = e
-            logger.warning("OpenRouter compat proxy stream interrupted: %s", e)
+            logger.warning(
+                "OpenRouter compat proxy stream interrupted: %s", type(e).__name__
+            )
         finally:
             if not cancelled:
                 upstream_response.release()

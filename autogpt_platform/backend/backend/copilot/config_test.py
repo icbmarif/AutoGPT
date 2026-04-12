@@ -131,7 +131,7 @@ class TestClaudeAgentUseCompatProxyEnvFallback:
     prefixed ``CHAT_CLAUDE_AGENT_USE_COMPAT_PROXY`` env var and the
     unprefixed ``CLAUDE_AGENT_USE_COMPAT_PROXY`` form.  Regression
     guard for the bool-default pitfall: the field has a non-None
-    default (``False``), so Pydantic passes the default into the
+    default (``True``), so Pydantic passes the default into the
     validator when no value is provided and a naive ``if v is None``
     check would never fire.
     """
