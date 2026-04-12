@@ -44,6 +44,7 @@ class TestBuildSdkEnvSubscription:
         assert result["ANTHROPIC_API_KEY"] == ""
         assert result["ANTHROPIC_AUTH_TOKEN"] == ""
         assert result["ANTHROPIC_BASE_URL"] == ""
+        assert result.get("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") == "1"
         mock_validate.assert_called_once()
 
     @patch(
@@ -78,6 +79,7 @@ class TestBuildSdkEnvDirectAnthropic:
         assert "ANTHROPIC_API_KEY" not in result
         assert "ANTHROPIC_AUTH_TOKEN" not in result
         assert "ANTHROPIC_BASE_URL" not in result
+        assert result.get("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") == "1"
 
     def test_no_anthropic_key_overrides_when_openrouter_flag_true_but_no_key(self):
         """OpenRouter flag is True but no api_key => openrouter_active is False."""
