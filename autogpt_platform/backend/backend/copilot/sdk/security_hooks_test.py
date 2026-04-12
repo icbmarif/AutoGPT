@@ -56,11 +56,12 @@ def test_unknown_tool_allowed():
 # -- Workspace-scoped tools --------------------------------------------------
 
 
-def test_read_within_workspace_allowed():
+def test_read_builtin_blocked():
+    """SDK built-in Read is blocked — all reads go through MCP read_file tool."""
     result = _validate_tool_access(
         "Read", {"file_path": f"{SDK_CWD}/file.txt"}, sdk_cwd=SDK_CWD
     )
-    assert result == {}
+    assert _is_denied(result)
 
 
 def test_write_builtin_blocked():

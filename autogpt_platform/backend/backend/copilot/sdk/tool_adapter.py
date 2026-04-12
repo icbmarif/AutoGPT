@@ -748,14 +748,18 @@ _SDK_BUILTIN_TOOLS = [*_SDK_BUILTIN_FILE_TOOLS, *_SDK_BUILTIN_ALWAYS]
 # Edit: same truncation risk as Write — the CLI's built-in Edit has no
 #   defence against output-token truncation.  All edits go through our
 #   MCP Edit tool (file_tools.py).
-# Note: Read is NOT disallowed — the CLI uses Read internally for
-#   oversized tool results.  Our MCP read_file is an additional tool.
+# Read: already disallowed in E2B mode (prod/dev) via
+#   _SDK_BUILTIN_FILE_TOOLS.  Disallow in non-E2B too for consistency
+#   — our MCP read_file handles tool-results paths via
+#   is_allowed_local_path() and has been the only Read available in
+#   prod without issues.
 SDK_DISALLOWED_TOOLS = [
     "Bash",
     "WebFetch",
     "AskUserQuestion",
     "Write",
     "Edit",
+    "Read",
 ]
 
 # Tools that are blocked entirely in security hooks (defence-in-depth).
@@ -772,10 +776,11 @@ BLOCKED_TOOLS = {
 # Tools allowed only when their path argument stays within the SDK workspace.
 # The SDK uses these to handle oversized tool results (writes to tool-results/
 # files, then reads them back) and for workspace file operations.
-# Write and Edit are NOT included: they are in SDK_DISALLOWED_TOOLS because
-# the SDK built-in versions are fully replaced by MCP equivalents.  Including
-# them here would conflict with the disallow list.
-WORKSPACE_SCOPED_TOOLS = {"Read", "Glob", "Grep"}
+# Read, Write, and Edit are NOT included: they are in
+# SDK_DISALLOWED_TOOLS because the SDK built-in versions are fully
+# replaced by MCP equivalents.  Including them here would conflict
+# with the disallow list.
+WORKSPACE_SCOPED_TOOLS = {"Glob", "Grep"}
 
 # Dangerous patterns in tool inputs
 DANGEROUS_PATTERNS = [
