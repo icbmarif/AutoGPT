@@ -658,7 +658,7 @@ def get_service_client(
                     # attribute that ``exc.args`` alone doesn't preserve.
                     # If the server included it in ``extras``, thread it
                     # back into the reconstructed exception.
-                    if issubclass(exception_class, exceptions.GraphValidationError):
+                    if exception_class is exceptions.GraphValidationError:
                         msg = str(args[0]) if args else str(e)
                         node_errors = (
                             error_response.extras.node_errors

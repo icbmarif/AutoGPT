@@ -4,7 +4,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future
-from typing import Mapping, Optional, cast
+from typing import Literal, Mapping, Optional, cast
 
 from pydantic import BaseModel, JsonValue, ValidationError
 
@@ -272,7 +272,8 @@ CRED_ERR_UNKNOWN_PREFIX = "Unknown credentials #"
 # message. Each entry is (match_mode, lowercased_marker) — "exact" means
 # the full message must equal the marker, "prefix" means it must start
 # with the marker.
-_CREDENTIAL_ERROR_MARKERS: tuple[tuple[str, str], ...] = (
+_MatchMode = Literal["exact", "prefix"]
+_CREDENTIAL_ERROR_MARKERS: tuple[tuple[_MatchMode, str], ...] = (
     ("exact", CRED_ERR_REQUIRED.lower()),
     ("prefix", CRED_ERR_INVALID_PREFIX.lower()),
     ("prefix", CRED_ERR_NOT_AVAILABLE_PREFIX.lower()),

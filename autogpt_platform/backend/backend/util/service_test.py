@@ -7,6 +7,7 @@ from typing import Any, Protocol, cast
 from unittest.mock import Mock
 
 import httpx
+import orjson
 import pytest
 from prisma.errors import DataError, UniqueViolationError
 from pydantic import TypeAdapter
@@ -18,6 +19,7 @@ from backend.util.service import (
     AppServiceClient,
     HTTPClientError,
     HTTPServerError,
+    RemoteCallError,
     endpoint_to_async,
     expose,
     get_service_client,
@@ -571,10 +573,6 @@ class TestHTTPErrorRetryBehavior:
         handler would go unnoticed — the client tests mock the wire
         payload directly and wouldn't catch it.
         """
-        import orjson
-
-        from backend.util.service import RemoteCallError
-
         node_errors = {
             "node-a": {
                 "credentials": "These credentials are required",
@@ -614,8 +612,6 @@ class TestHTTPErrorRetryBehavior:
         client-unpacks tests — if either side drifts, this test fails
         even when both one-sided tests pass.
         """
-        import orjson
-
         node_errors = {
             "node-x": {"credentials": "These credentials are required"},
         }

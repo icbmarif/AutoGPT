@@ -668,6 +668,7 @@ async def test_run_agent_execution_credential_race_returns_setup_card(
 
     with patch(
         "backend.copilot.tools.run_agent.execution_utils.add_graph_execution",
+        new_callable=AsyncMock,
         side_effect=GraphValidationError(
             message="Graph is invalid",
             node_errors={
