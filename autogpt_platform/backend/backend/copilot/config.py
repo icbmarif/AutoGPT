@@ -326,10 +326,10 @@ class ChatConfig(BaseSettings):
             v = os.getenv("CHAT_CLAUDE_AGENT_CLI_PATH")
             if not v:
                 v = os.getenv("CLAUDE_AGENT_CLI_PATH")
-        if v and not os.access(v, os.X_OK):
+        if v and os.path.exists(v) and not os.access(v, os.X_OK):
             raise ValueError(
-                f"claude_agent_cli_path '{v}' is not an executable file. "
-                "Check the path and file permissions."
+                f"claude_agent_cli_path '{v}' exists but is not executable. "
+                "Check file permissions."
             )
         return v
 
