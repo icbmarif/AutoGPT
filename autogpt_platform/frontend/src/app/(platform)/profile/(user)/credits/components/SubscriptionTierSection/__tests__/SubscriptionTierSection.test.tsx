@@ -113,10 +113,6 @@ describe("SubscriptionTierSection", () => {
   it("renders skeleton cards while loading", () => {
     setupMocks({ isLoading: true });
     render(<SubscriptionTierSection />);
-    // Skeleton loader renders three placeholder cards to prevent layout shift
-    const skeletons = document.querySelectorAll(
-      ".animate-pulse, [class*='Skeleton'], [class*='h-40']",
-    );
     // Just verify we're rendering something (not null) and no tier cards
     expect(screen.queryByText("Pro")).toBeNull();
     expect(screen.queryByText("Business")).toBeNull();
