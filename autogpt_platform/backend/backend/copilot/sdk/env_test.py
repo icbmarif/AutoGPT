@@ -125,7 +125,9 @@ class TestBuildSdkEnvOpenRouter:
         assert result["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
         assert result["ANTHROPIC_AUTH_TOKEN"] == "sk-or-test-key"
         assert result["ANTHROPIC_API_KEY"] == ""
-        assert "ANTHROPIC_CUSTOM_HEADERS" not in result
+        # SDK 0.1.58: Accept-Encoding: identity is always injected
+        assert "ANTHROPIC_CUSTOM_HEADERS" in result
+        assert "Accept-Encoding: identity" in result["ANTHROPIC_CUSTOM_HEADERS"]
         # OpenRouter compat: env var must always be present
         assert result.get("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") == "1"
 
@@ -217,9 +219,13 @@ class TestBuildSdkEnvOpenRouter:
             long_id = "x" * 200
             result = build_sdk_env(session_id=long_id)
 
-        # The value after "x-session-id: " should be at most 128 chars
-        header_line = result["ANTHROPIC_CUSTOM_HEADERS"]
-        value = header_line.split(": ", 1)[1]
+        # SDK 0.1.58 appends Accept-Encoding: identity on a separate line.
+        # Parse the x-session-id line specifically and check its value length.
+        headers = result["ANTHROPIC_CUSTOM_HEADERS"]
+        session_line = next(
+            line for line in headers.splitlines() if line.startswith("x-session-id: ")
+        )
+        value = session_line.split(": ", 1)[1]
         assert len(value) == 128
 
     @pytest.mark.parametrize(
@@ -275,8 +281,8 @@ class TestBuildSdkEnvModePriority:
         assert result["ANTHROPIC_API_KEY"] == ""
         assert result["ANTHROPIC_AUTH_TOKEN"] == ""
         assert result["ANTHROPIC_BASE_URL"] == ""
-        # OpenRouter-specific key must NOT be present
-        assert "ANTHROPIC_CUSTOM_HEADERS" not in result
+        # SDK 0.1.58: Accept-Encoding: identity is always injected — no trace headers
+        assert result.get("ANTHROPIC_CUSTOM_HEADERS") == "Accept-Encoding: identity"
 
 
 # ---------------------------------------------------------------------------
