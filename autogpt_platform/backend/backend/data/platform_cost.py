@@ -352,8 +352,11 @@ async def get_platform_cost_dashboard(
     # Build parameterised WHERE clause for the raw SQL percentile/bucket
     # queries.  Uses _build_raw_where so filter logic is shared with
     # _build_prisma_where and only maintained in one place.
+    # Always force tracking_type=None here so _build_raw_where defaults to
+    # "cost_usd" — percentile and histogram queries only make sense on
+    # cost-denominated rows, regardless of what the caller is filtering.
     raw_where, raw_params = _build_raw_where(
-        start, end, provider, user_id, model, block_name, tracking_type
+        start, end, provider, user_id, model, block_name, tracking_type=None
     )
 
     # Queries that always run regardless of tracking_type filter.

@@ -185,7 +185,9 @@ describe("PlatformCostContent", () => {
     );
     expect(screen.getByText("$5.0000")).toBeDefined();
     expect(screen.getByText("100")).toBeDefined();
-    expect(screen.getByText("5")).toBeDefined();
+    // "5" appears in multiple places (Active Users card + bucket count),
+    // so verify at least one element renders it.
+    expect(screen.getAllByText("5").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("openai")).toBeDefined();
     expect(screen.getByText("google_maps")).toBeDefined();
   });

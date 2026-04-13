@@ -264,8 +264,7 @@ export function PlatformCostContent({ searchParams }: Props) {
                     value: Math.round(
                       dashboard.avg_output_tokens_per_request ?? 0,
                     ).toLocaleString(),
-                    subtitle:
-                      "Completion tokens per request (response length)",
+                    subtitle: "Completion tokens per request (response length)",
                   },
                   {
                     label: "Total Tokens",
