@@ -10,12 +10,13 @@ import { SubscriptionTierSection } from "../SubscriptionTierSection";
 
 // Mock next/navigation
 const mockSearchParams = new URLSearchParams();
+const mockRouterReplace = vi.fn();
 vi.mock("next/navigation", async (importOriginal) => {
   const actual = await importOriginal<typeof import("next/navigation")>();
   return {
     ...actual,
     useSearchParams: () => mockSearchParams,
-    useRouter: () => ({ push: vi.fn() }),
+    useRouter: () => ({ push: vi.fn(), replace: mockRouterReplace }),
     usePathname: () => "/profile/credits",
   };
 });
@@ -103,6 +104,7 @@ afterEach(() => {
   mockUseGetSubscriptionStatus.mockReset();
   mockUseUpdateSubscriptionTier.mockReset();
   mockToast.mockReset();
+  mockRouterReplace.mockReset();
   // Reset search params
   mockSearchParams.delete("subscription");
 });
@@ -288,5 +290,19 @@ describe("SubscriptionTierSection", () => {
     // No standard tier cards should be rendered
     expect(screen.queryByText("Pro")).toBeNull();
     expect(screen.queryByText("Business")).toBeNull();
+  });
+
+  it("shows success toast and clears URL param when ?subscription=success is present", async () => {
+    mockSearchParams.set("subscription", "success");
+    setupMocks();
+    render(<SubscriptionTierSection />);
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: "Subscription upgraded" }),
+      );
+    });
+    // URL param must be stripped so a page refresh doesn't re-trigger the toast
+    expect(mockRouterReplace).toHaveBeenCalledWith("/profile/credits");
   });
 });

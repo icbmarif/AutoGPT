@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useEffect, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   useGetSubscriptionStatus,
   useUpdateSubscriptionTier,
@@ -13,8 +13,9 @@ export type SubscriptionStatus = SubscriptionStatusResponse;
 export function useSubscriptionTierSection() {
   const searchParams = useSearchParams();
   const subscriptionStatus = searchParams.get("subscription");
+  const router = useRouter();
+  const pathname = usePathname();
   const { toast } = useToast();
-  const toastShownRef = useRef(false);
   const [tierError, setTierError] = useState<string | null>(null);
 
   const {
@@ -36,22 +37,18 @@ export function useSubscriptionTierSection() {
 
   useEffect(() => {
     if (subscriptionStatus === "success") {
-      if (!toastShownRef.current) {
-        toastShownRef.current = true;
-        refetch();
-        toast({
-          title: "Subscription upgraded",
-          description:
-            "Your plan has been updated. It may take a moment to reflect.",
-        });
-      }
-    } else {
-      // Reset so the toast fires again if the user completes another checkout
-      // during the same mount (e.g. SPA navigation away and back with a new
-      // ?subscription=success param).
-      toastShownRef.current = false;
+      refetch();
+      toast({
+        title: "Subscription upgraded",
+        description:
+          "Your plan has been updated. It may take a moment to reflect.",
+      });
+      // Strip ?subscription=success from the URL so a page refresh does not
+      // re-trigger the toast, and so a second checkout in the same session
+      // correctly fires the toast again.
+      router.replace(pathname);
     }
-  }, [subscriptionStatus, refetch, toast]);
+  }, [subscriptionStatus, refetch, toast, router, pathname]);
 
   async function changeTier(tier: string) {
     setTierError(null);
