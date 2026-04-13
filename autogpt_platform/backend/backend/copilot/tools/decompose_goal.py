@@ -24,13 +24,9 @@ VALID_ACTIONS = {"add_block", "connect_blocks", "configure", "add_input", "add_o
 
 # Auto-approve countdown — single source of truth for both client and server.
 # The frontend reads ``auto_approve_seconds`` from the tool response and runs
-# the visible countdown. The server fallback runs slightly longer to absorb
-# network latency / SSE round-trip when the client also sends "Approved".
+# the visible countdown. The server fires at the same deadline.
 AUTO_APPROVE_CLIENT_SECONDS = 60
-AUTO_APPROVE_SERVER_GRACE_SECONDS = 30
-AUTO_APPROVE_SERVER_SECONDS = (
-    AUTO_APPROVE_CLIENT_SECONDS + AUTO_APPROVE_SERVER_GRACE_SECONDS
-)
+AUTO_APPROVE_SERVER_SECONDS = AUTO_APPROVE_CLIENT_SECONDS
 AUTO_APPROVE_MESSAGE = "Approved. Please build the agent."
 
 # Fire-and-forget tasks held to keep them alive and self-clean on completion.
