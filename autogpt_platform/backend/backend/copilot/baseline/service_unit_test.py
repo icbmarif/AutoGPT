@@ -13,6 +13,7 @@ from backend.copilot.baseline.service import (
     _baseline_conversation_updater,
     _BaselineStreamState,
     _compress_session_messages,
+    _estimate_cost_from_tokens,
     _ThinkingStripper,
 )
 from backend.copilot.model import ChatMessage
@@ -633,6 +634,23 @@ class TestPrepareBaselineAttachments:
         assert blocks == []
 
 
+class TestEstimateCostFromTokens:
+    """Tests for _estimate_cost_from_tokens fallback pricing."""
+
+    def test_known_model_returns_estimated_cost(self):
+        cost = _estimate_cost_from_tokens("anthropic/claude-sonnet-4", 1000, 500)
+        # 1000 * 3.0/1M + 500 * 15.0/1M = 0.003 + 0.0075 = 0.0105
+        assert cost == pytest.approx(0.0105)
+
+    def test_unknown_model_returns_none(self):
+        cost = _estimate_cost_from_tokens("unknown/model", 1000, 500)
+        assert cost is None
+
+    def test_zero_tokens_returns_zero(self):
+        cost = _estimate_cost_from_tokens("openai/gpt-4o", 0, 0)
+        assert cost == pytest.approx(0.0)
+
+
 class TestBaselineCostExtraction:
     """Tests for x-total-cost header extraction in _baseline_llm_caller."""
 
@@ -828,3 +846,95 @@ class TestBaselineCostExtraction:
 
         # response was never assigned so cost extraction must not raise
         assert state.cost_usd is None
+
+    @pytest.mark.asyncio
+    async def test_cost_estimated_from_tokens_when_header_missing(self):
+        """cost_usd is estimated from token counts when x-total-cost is absent."""
+        from backend.copilot.baseline.service import (
+            _baseline_llm_caller,
+            _BaselineStreamState,
+        )
+
+        # Use a model that is in the pricing table
+        state = _BaselineStreamState(model="anthropic/claude-sonnet-4")
+
+        mock_raw = MagicMock()
+        mock_raw.headers = {}  # no x-total-cost
+        mock_stream = MagicMock()
+        mock_stream._response = mock_raw
+
+        # Create a chunk that reports usage tokens
+        mock_chunk = MagicMock()
+        mock_chunk.usage = MagicMock()
+        mock_chunk.usage.prompt_tokens = 1000
+        mock_chunk.usage.completion_tokens = 500
+        mock_chunk.usage.prompt_tokens_details = None
+        mock_chunk.choices = []
+
+        async def chunk_aiter():
+            yield mock_chunk
+
+        mock_stream.__aiter__ = lambda self: chunk_aiter()
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_stream)
+
+        with patch(
+            "backend.copilot.baseline.service._get_openai_client",
+            return_value=mock_client,
+        ):
+            await _baseline_llm_caller(
+                messages=[{"role": "user", "content": "hi"}],
+                tools=[],
+                state=state,
+            )
+
+        # Expected: 1000 * 3.0/1M + 500 * 15.0/1M = 0.003 + 0.0075 = 0.0105
+        assert state.cost_usd == pytest.approx(0.0105)
+
+    @pytest.mark.asyncio
+    async def test_cache_tokens_extracted_from_usage_details(self):
+        """cache tokens are extracted from prompt_tokens_details.cached_tokens."""
+        from backend.copilot.baseline.service import (
+            _baseline_llm_caller,
+            _BaselineStreamState,
+        )
+
+        state = _BaselineStreamState(model="openai/gpt-4o")
+
+        mock_raw = MagicMock()
+        mock_raw.headers = {"x-total-cost": "0.01"}
+        mock_stream = MagicMock()
+        mock_stream._response = mock_raw
+
+        # Create a chunk with prompt_tokens_details
+        mock_ptd = MagicMock()
+        mock_ptd.cached_tokens = 800
+
+        mock_chunk = MagicMock()
+        mock_chunk.usage = MagicMock()
+        mock_chunk.usage.prompt_tokens = 1000
+        mock_chunk.usage.completion_tokens = 200
+        mock_chunk.usage.prompt_tokens_details = mock_ptd
+        mock_chunk.choices = []
+
+        async def chunk_aiter():
+            yield mock_chunk
+
+        mock_stream.__aiter__ = lambda self: chunk_aiter()
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_stream)
+
+        with patch(
+            "backend.copilot.baseline.service._get_openai_client",
+            return_value=mock_client,
+        ):
+            await _baseline_llm_caller(
+                messages=[{"role": "user", "content": "hi"}],
+                tools=[],
+                state=state,
+            )
+
+        assert state.turn_cache_read_tokens == 800
+        assert state.turn_prompt_tokens == 1000
