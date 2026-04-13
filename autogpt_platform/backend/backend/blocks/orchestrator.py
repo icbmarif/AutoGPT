@@ -1192,13 +1192,16 @@ class OrchestratorBlock(Block):
                     raise
                 except Exception:
                     # Non-billing charge failures (DB outage, network, etc.)
-                    # are logged with full traceback but surfaced to the LLM
-                    # as a generic error to avoid leaking infrastructure details.
+                    # must NOT propagate to the outer except handler because
+                    # the tool itself succeeded. Re-raising would mark the
+                    # tool as failed (_is_error=True), causing the LLM to
+                    # retry side-effectful operations. Log and continue.
                     logger.exception(
-                        "Unexpected error charging for tool node %s",
+                        "Unexpected error charging for tool node %s; "
+                        "tool execution was successful",
                         sink_node_id,
                     )
-                    raise
+                    tool_cost = 0
                 if tool_cost > 0:
                     self.merge_stats(NodeExecutionStats(extra_cost=tool_cost))
 
