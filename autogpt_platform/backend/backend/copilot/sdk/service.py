@@ -13,7 +13,22 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, cast
+
+
+class _SystemPromptPreset(TypedDict):
+    """Local stand-in for the SDK's SystemPromptPreset.
+
+    The production SDK (>=0.1.58) defines this type natively.  We keep a
+    local copy so that:
+      1. The code type-checks on older SDK pins (e.g. 0.1.45 on dev).
+      2. Tests can import and verify the shape without an SDK upgrade.
+    """
+
+    type: Literal["preset"]
+    preset: Literal["claude_code"]
+    append: str
+    exclude_dynamic_sections: bool
 
 if TYPE_CHECKING:
     from backend.copilot.permissions import CopilotPermissions
@@ -697,6 +712,28 @@ def _is_fallback_stderr(line: str) -> bool:
     without wiring up the full ``_on_stderr`` closure.
     """
     return "fallback model" in line.lower()
+
+
+def _build_system_prompt_value(
+    system_prompt: str,
+    cross_user_cache: bool,
+) -> str | _SystemPromptPreset:
+    """Build the ``system_prompt`` argument for :class:`ClaudeAgentOptions`.
+
+    When *cross_user_cache* is enabled, returns a :class:`_SystemPromptPreset`
+    dict so the Claude Code default prompt becomes a cacheable prefix shared
+    across all users; our custom *system_prompt* is appended after it.
+
+    When disabled, the raw *system_prompt* string is returned unchanged.
+    """
+    if cross_user_cache:
+        return _SystemPromptPreset(
+            type="preset",
+            preset="claude_code",
+            append=system_prompt,
+            exclude_dynamic_sections=True,
+        )
+    return system_prompt
 
 
 def _make_sdk_cwd(session_id: str) -> str:
@@ -2220,21 +2257,16 @@ async def stream_chat_completion_sdk(
                     sid,
                 )
 
-        # When exclude_dynamic_sections is enabled, use SystemPromptPreset
+        # When cross-user prompt caching is enabled, use SystemPromptPreset
         # so the Claude Code default prompt is a cacheable prefix shared
         # across all users.  Our custom prompt is appended after it and
         # dynamic sections (working dir, git status, auto-memory) are
         # excluded from the prefix — giving us cross-user cache hits that
         # reduce input token cost by ~90%.
-        if config.claude_agent_exclude_dynamic_sections:
-            system_prompt_value: str | dict[str, Any] = {
-                "type": "preset",
-                "preset": "claude_code",
-                "append": system_prompt,
-                "exclude_dynamic_sections": True,
-            }
-        else:
-            system_prompt_value = system_prompt
+        system_prompt_value = _build_system_prompt_value(
+            system_prompt,
+            cross_user_cache=config.claude_agent_cross_user_prompt_cache,
+        )
 
         sdk_options_kwargs: dict[str, Any] = {
             "system_prompt": system_prompt_value,

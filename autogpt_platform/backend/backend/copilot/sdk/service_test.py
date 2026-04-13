@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from .service import (
+    _build_system_prompt_value,
     _is_sdk_disconnect_error,
     _normalize_model_name,
     _prepare_file_attachments,
@@ -664,34 +665,12 @@ class TestSafeCloseSdkClient:
 
 
 class TestSystemPromptPreset:
-    """Tests for SystemPromptPreset construction with exclude_dynamic_sections."""
+    """Tests for _build_system_prompt_value — cross-user prompt caching."""
 
-    def _make_config(self, exclude: bool, monkeypatch, _clean_config_env):
-        from backend.copilot import config as cfg_mod
-
-        return cfg_mod.ChatConfig(
-            use_openrouter=False,
-            api_key=None,
-            base_url=None,
-            use_claude_code_subscription=False,
-            claude_agent_exclude_dynamic_sections=exclude,
-        )
-
-    def test_preset_dict_structure_when_enabled(self, monkeypatch, _clean_config_env):
-        """When exclude_dynamic_sections is True, system_prompt should be a
-        SystemPromptPreset dict with the correct keys."""
-        cfg = self._make_config(True, monkeypatch, _clean_config_env)
-
+    def test_preset_dict_structure_when_enabled(self):
+        """When cross_user_cache is True, returns a _SystemPromptPreset dict."""
         custom_prompt = "You are a helpful assistant."
-        if cfg.claude_agent_exclude_dynamic_sections:
-            result = {
-                "type": "preset",
-                "preset": "claude_code",
-                "append": custom_prompt,
-                "exclude_dynamic_sections": True,
-            }
-        else:
-            result = custom_prompt
+        result = _build_system_prompt_value(custom_prompt, cross_user_cache=True)
 
         assert isinstance(result, dict)
         assert result["type"] == "preset"
@@ -699,27 +678,16 @@ class TestSystemPromptPreset:
         assert result["append"] == custom_prompt
         assert result["exclude_dynamic_sections"] is True
 
-    def test_raw_string_when_disabled(self, monkeypatch, _clean_config_env):
-        """When exclude_dynamic_sections is False, system_prompt should be a
-        raw string."""
-        cfg = self._make_config(False, monkeypatch, _clean_config_env)
-
+    def test_raw_string_when_disabled(self):
+        """When cross_user_cache is False, returns the raw string."""
         custom_prompt = "You are a helpful assistant."
-        if cfg.claude_agent_exclude_dynamic_sections:
-            result = {
-                "type": "preset",
-                "preset": "claude_code",
-                "append": custom_prompt,
-                "exclude_dynamic_sections": True,
-            }
-        else:
-            result = custom_prompt
+        result = _build_system_prompt_value(custom_prompt, cross_user_cache=False)
 
         assert isinstance(result, str)
         assert result == custom_prompt
 
-    def test_default_is_enabled(self, monkeypatch, _clean_config_env):
-        """The default value for claude_agent_exclude_dynamic_sections is True."""
+    def test_default_config_is_enabled(self, monkeypatch, _clean_config_env):
+        """The default value for claude_agent_cross_user_prompt_cache is True."""
         from backend.copilot import config as cfg_mod
 
         cfg = cfg_mod.ChatConfig(
@@ -728,4 +696,4 @@ class TestSystemPromptPreset:
             base_url=None,
             use_claude_code_subscription=False,
         )
-        assert cfg.claude_agent_exclude_dynamic_sections is True
+        assert cfg.claude_agent_cross_user_prompt_cache is True
