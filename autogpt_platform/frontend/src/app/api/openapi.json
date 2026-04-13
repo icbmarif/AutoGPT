@@ -13891,7 +13891,11 @@
       },
       "SubscriptionStatusResponse": {
         "properties": {
-          "tier": { "type": "string", "enum": ["FREE", "PRO", "BUSINESS", "ENTERPRISE"], "title": "Tier" },
+          "tier": {
+            "type": "string",
+            "enum": ["FREE", "PRO", "BUSINESS", "ENTERPRISE"],
+            "title": "Tier"
+          },
           "monthly_cost": { "type": "integer", "title": "Monthly Cost" },
           "tier_costs": {
             "additionalProperties": { "type": "integer" },
