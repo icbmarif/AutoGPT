@@ -1128,6 +1128,12 @@ class OrchestratorBlock(Block):
             # Execute the node directly since we're in the Orchestrator context.
             # Wrap in try/except so the future is always resolved, even on
             # error — an unresolved Future would block anything awaiting it.
+            #
+            # on_node_execution is decorated with @async_error_logged(swallow=True),
+            # which catches BaseException and returns None rather than raising.
+            # Treat a None return as a failure: set_exception so the future
+            # carries an error state rather than a None result, and return an
+            # error response so the LLM knows the tool failed.
             try:
                 tool_node_stats = await execution_processor.on_node_execution(
                     node_exec=node_exec_entry,
@@ -1135,19 +1141,23 @@ class OrchestratorBlock(Block):
                     nodes_input_masks=None,
                     graph_stats_pair=graph_stats_pair,
                 )
+                if tool_node_stats is None:
+                    nil_err = RuntimeError(
+                        f"on_node_execution returned None for node {sink_node_id} "
+                        "(error was swallowed by @async_error_logged)"
+                    )
+                    node_exec_future.set_exception(nil_err)
+                    resp = _create_tool_response(
+                        tool_call.id,
+                        "Tool execution returned no result",
+                        responses_api=responses_api,
+                    )
+                    resp["_is_error"] = True
+                    return resp
                 node_exec_future.set_result(tool_node_stats)
             except Exception as exec_err:
                 node_exec_future.set_exception(exec_err)
                 raise
-
-            if tool_node_stats is None:
-                resp = _create_tool_response(
-                    tool_call.id,
-                    "Tool execution returned no result",
-                    responses_api=responses_api,
-                )
-                resp["_is_error"] = True
-                return resp
 
             # Charge user credits AFTER successful tool execution. Tools
             # spawned by the orchestrator bypass the main execution queue
@@ -1165,7 +1175,6 @@ class OrchestratorBlock(Block):
             # by the generic tool-error handler below.
             if (
                 not execution_params.execution_context.dry_run
-                and tool_node_stats is not None
                 and tool_node_stats.error is None
             ):
                 try:

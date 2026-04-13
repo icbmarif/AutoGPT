@@ -753,8 +753,7 @@ class ExecutionProcessor:
                     )
                 except Exception as notif_error:  # pragma: no cover
                     log_metadata.warning(
-                        f"Failed to send insufficient funds notification: "
-                        f"{notif_error}"
+                        f"Failed to send insufficient funds notification: {notif_error}"
                     )
             except Exception as e:
                 # Unexpected billing failure (DB outage, network, etc.).
@@ -832,7 +831,7 @@ class ExecutionProcessor:
                 )
             except Exception as notif_error:  # pragma: no cover
                 log_metadata.warning(
-                    f"Failed to send insufficient funds notification: " f"{notif_error}"
+                    f"Failed to send insufficient funds notification: {notif_error}"
                 )
 
         return execution_stats
@@ -1153,6 +1152,13 @@ class ExecutionProcessor:
 
         Called only from :meth:`charge_extra_iterations`. Do not call
         directly from async code.
+
+        Note: ``_resolve_block_cost`` is called again here (rather than
+        reusing the result from ``_charge_usage`` at the start of execution)
+        because the two calls happen in separate thread-pool workers and
+        sharing mutable state across workers would require locks. The block
+        config is immutable during a run, so the repeated lookup is safe and
+        produces the same cost; the only overhead is an extra registry lookup.
         """
         db_client = get_db_client()
         block, cost, matching_filter = self._resolve_block_cost(node_exec)

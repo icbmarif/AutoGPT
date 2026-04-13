@@ -540,6 +540,9 @@ async def test_on_node_execution_charges_extra_iterations_when_gate_passes(
         graph_stats_pair=stats_pair,
     )
     assert calls["charge_extra_iterations"] == [2]
+    # _handle_low_balance must be called with the remaining balance returned by
+    # charge_extra_iterations (500) so users are alerted when balance drops low.
+    assert len(calls["handle_low_balance"]) == 1
 
 
 @pytest.mark.asyncio
@@ -832,3 +835,74 @@ async def test_tool_execution_insufficient_balance_propagates():
         charge_node_usage_mock=raising_charge,
     )
     assert isinstance(raised, InsufficientBalanceError)
+
+
+# ── on_node_execution FAILED + InsufficientBalanceError notification ──
+
+
+@pytest.mark.asyncio
+async def test_on_node_execution_failed_ibe_sends_notification(
+    monkeypatch,
+    gated_processor,
+):
+    """When status == FAILED and execution_stats.error is InsufficientBalanceError,
+    _handle_insufficient_funds_notif must be called.
+
+    This path fires when a nested tool charge inside the orchestrator raises
+    InsufficientBalanceError, which propagates out of the block's run() generator
+    and is caught by _on_node_execution's broad except, setting status=FAILED and
+    execution_stats.error=IBE. on_node_execution's post-execution block then
+    sends the user notification so they understand why the run stopped.
+    """
+    from backend.data.execution import ExecutionStatus
+    from backend.executor import manager
+    from backend.util.exceptions import InsufficientBalanceError
+
+    proc, calls, inner, fake_db, NodeExecutionStats = gated_processor
+    ibe = InsufficientBalanceError(
+        user_id="u",
+        message="Insufficient balance",
+        balance=0,
+        amount=30,
+    )
+
+    # Simulate _on_node_execution returning FAILED with IBE in stats.error.
+    async def fake_inner_failed(
+        self,
+        *,
+        node,
+        node_exec,
+        node_exec_progress,
+        stats,
+        db_client,
+        log_metadata,
+        nodes_input_masks=None,
+        nodes_to_skip=None,
+    ):
+        stats.error = ibe
+        return MagicMock(wall_time=0.1, cpu_time=0.1), ExecutionStatus.FAILED
+
+    monkeypatch.setattr(
+        manager.ExecutionProcessor,
+        "_on_node_execution",
+        fake_inner_failed,
+    )
+    fake_db.get_node = AsyncMock(return_value=_FakeNode(extra_charges=0))
+
+    stats_pair = (
+        MagicMock(
+            node_count=0, nodes_cputime=0, nodes_walltime=0, cost=0, node_error_count=0
+        ),
+        threading.Lock(),
+    )
+    await proc.on_node_execution(
+        node_exec=_make_node_exec(dry_run=False),
+        node_exec_progress=MagicMock(),
+        nodes_input_masks=None,
+        graph_stats_pair=stats_pair,
+    )
+    # The notification must have fired so the user knows why their run stopped.
+    assert len(calls["handle_insufficient_funds_notif"]) == 1
+    assert calls["handle_insufficient_funds_notif"][0]["user_id"] == "u"
+    # charge_extra_iterations must NOT be called — status is FAILED.
+    assert calls["charge_extra_iterations"] == []
