@@ -7,25 +7,27 @@ stripped from the SSE stream and the persisted assistant message.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 from backend.copilot.model import ChatMessage, ChatSession
 from backend.copilot.response_model import StreamTextDelta
-from backend.copilot.sdk.service import (
-    _dispatch_response,
-    _StreamAccumulator,
-)
+from backend.copilot.sdk.service import _dispatch_response, _StreamAccumulator
+
+_NOW = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
 
 def _make_ctx() -> MagicMock:
     """Build a minimal _StreamContext mock."""
     ctx = MagicMock()
     ctx.session = ChatSession(
-        id="test",
+        session_id="test",
+        user_id="test-user",
         title="test",
         messages=[],
-        created_at="",
-        updated_at="",
+        usage=[],
+        started_at=_NOW,
+        updated_at=_NOW,
     )
     ctx.log_prefix = "[test]"
     return ctx
