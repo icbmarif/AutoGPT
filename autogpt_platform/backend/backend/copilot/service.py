@@ -319,6 +319,14 @@ async def inject_user_context(
             # wastes tokens. Fall back to the bare sanitized message instead.
             final_message = sanitized_message
         else:
+            # _sanitize_user_context_field is applied to the combined output of
+            # format_understanding_for_prompt rather than to each individual
+            # field. This is intentional: format_understanding_for_prompt
+            # produces a single structured string from trusted DB data, so the
+            # trust boundary is at the DB read, not at each field boundary.
+            # Sanitizing at the combined level is both correct and sufficient —
+            # it strips any residual tag-like sequences before the string is
+            # wrapped in the <user_context> block that the LLM sees.
             user_ctx = _sanitize_user_context_field(raw_ctx)
             final_message = format_user_context_prefix(user_ctx) + sanitized_message
 

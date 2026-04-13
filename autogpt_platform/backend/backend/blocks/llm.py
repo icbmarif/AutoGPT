@@ -1024,6 +1024,11 @@ async def llm_call(
             model=llm_model.value,
             messages=messages,
             max_tokens=max_tokens,
+            # `an_tools` may be anthropic.NOT_GIVEN when no tools were
+            # configured. The SDK treats NOT_GIVEN as a sentinel meaning "omit
+            # this field from the serialized request", so passing it here is
+            # equivalent to not including the key at all — no `tools` field is
+            # sent to the API in that case.
             tools=an_tools,
             timeout=600,
         )

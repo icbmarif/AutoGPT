@@ -2298,6 +2298,12 @@ async def stream_chat_completion_sdk(
         # the query so that _build_query_message sees the full prefixed content.
         # The system prompt is now static (same for all users) so the LLM can
         # cache it across sessions.
+        #
+        # On resume (has_history=True) we intentionally skip re-injection: the
+        # transcript already contains the <user_context> prefix from the original
+        # turn (persisted to the DB in inject_user_context), so the SDK replay
+        # carries context continuity without us prepending it again.  Adding it
+        # a second time would duplicate the block and inflate tokens.
         if not has_history:
             prefixed_message = await inject_user_context(
                 understanding, current_message, session_id, session.messages
