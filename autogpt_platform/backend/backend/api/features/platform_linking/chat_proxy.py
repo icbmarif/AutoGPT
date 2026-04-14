@@ -86,7 +86,7 @@ async def bot_create_session(
         request.platform_server_id,
         request.platform_user_id,
     )
-    session = await create_chat_session(owner_user_id)
+    session = await create_chat_session(owner_user_id, dry_run=False)
 
     logger.info(
         "Bot created session %s for %s user %s in server %s (owner ...%s)",
@@ -130,7 +130,7 @@ async def bot_chat_stream(
         if not session:
             raise HTTPException(status_code=404, detail="Session not found.")
     else:
-        session = await create_chat_session(owner_user_id)
+        session = await create_chat_session(owner_user_id, dry_run=False)
         session_id = session.session_id
 
     message = ChatMessage(role="user", content=request.message)
