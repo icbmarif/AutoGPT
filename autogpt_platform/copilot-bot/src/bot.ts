@@ -82,7 +82,7 @@ export async function createBot(config: Config, stateAdapter: StateAdapter) {
 
     await thread.subscribe();
     await handleCoPilotMessage(
-      thread, message.text, platform, serverId, platformUserId, api,
+      thread, message, platform, serverId, platformUserId, api,
     );
   });
 
@@ -107,8 +107,58 @@ export async function createBot(config: Config, stateAdapter: StateAdapter) {
     }
 
     await handleCoPilotMessage(
-      thread, message.text, platform, serverId, platformUserId, api,
+      thread, message, platform, serverId, platformUserId, api,
     );
+  });
+
+  // ── /setup slash command — ephemeral link for owner onboarding ───────
+
+  bot.onSlashCommand("/setup", async (event) => {
+    const platform = event.adapter.name ?? "discord";
+    // Discord channel.id = "discord:{guildId}:{channelId}" or with threadId appended
+    const serverId = getServerId(event.channel.id);
+    const platformUserId = event.user.userId;
+    const username = event.user.userName ?? event.user.fullName;
+
+    console.log(
+      `[bot] /setup invoked in ${platform} server ${serverId} by ${platformUserId}`,
+    );
+
+    try {
+      const linkResult = await api.createLinkToken({
+        platform,
+        platformServerId: serverId,
+        platformUserId,
+        platformUsername: username,
+      });
+
+      await event.channel.postEphemeral(
+        event.user,
+        `Click to link this server to your AutoGPT account:\n${linkResult.link_url}\n\nThis link expires in 30 minutes. Once linked, everyone here can chat with AutoPilot — all usage will bill to your AutoGPT account.`,
+        { fallbackToDM: true },
+      );
+    } catch (err) {
+      if (err instanceof PlatformAPIError && err.status === 409) {
+        await event.channel.postEphemeral(
+          event.user,
+          "This server is already linked to an AutoGPT account. Everyone here can chat with AutoPilot by mentioning me.",
+          { fallbackToDM: true },
+        );
+        return;
+      }
+      console.error("[bot] /setup error:", err);
+      await event.channel.postEphemeral(
+        event.user,
+        "Sorry, I couldn't generate a setup link right now. Please try again later.",
+        { fallbackToDM: true },
+      );
+    }
+  });
+
+  bot.onSlashCommand("/help", async (event) => {
+    await event.channel.postEphemeral(event.user, helpText(), {
+      fallbackToDM: true,
+    });
   });
 
   return bot;
@@ -180,31 +230,13 @@ function getLinkContext(
 }
 
 /**
- * Attempt to DM a user via bot.openDM().
- * Returns true if the DM was sent, false if it failed (e.g. Telegram users
- * who haven't started a private chat with the bot, or unknown user ID format).
- */
-async function tryDM(
-  bot: Chat<Record<string, Adapter>, BotThreadState>,
-  message: Message,
-  text: string,
-): Promise<boolean> {
-  try {
-    const dmThread = await bot.openDM(message.author);
-    await dmThread.post(text);
-    return true;
-  } catch (err) {
-    console.log(
-      `[bot] DM unavailable for ${message.author.userId}, posting in thread instead:`,
-      err instanceof Error ? err.message : String(err),
-    );
-    return false;
-  }
-}
-
-/**
  * Handle a message in an unlinked server.
- * DMs the triggering user a one-time setup link — never posts in the channel.
+ *
+ * In a group/server: tell the user to run /setup — that's the only way to get
+ * a setup link now. /setup responds ephemerally so the link stays private.
+ *
+ * In a DM: there is no /setup flow; post the link directly in the DM since
+ * nobody else can see it anyway.
  */
 async function handleUnlinkedServer(
   thread: BotThread,
@@ -212,18 +244,27 @@ async function handleUnlinkedServer(
   platform: string,
   serverId: string,
   api: PlatformAPI,
-  bot: Chat<Record<string, Adapter>, BotThreadState>,
+  _bot: Chat<Record<string, Adapter>, BotThreadState>,
 ) {
-  const { isDirect, contextLabel } = getLinkContext(
+  const { isDirect } = getLinkContext(
     platform,
     serverId,
     message.author.userId,
   );
 
   console.log(
-    `[bot] ${isDirect ? "DM" : "Group"} ${platform}:${serverId} not linked, sending setup link`,
+    `[bot] ${isDirect ? "DM" : "Group"} ${platform}:${serverId} not linked`,
   );
 
+  if (!isDirect) {
+    // Group context: point them at the slash command.
+    await thread.post(
+      "This server isn't linked to an AutoGPT account yet. Run `/setup` to connect it — you'll get a private setup link only you can see.",
+    );
+    return;
+  }
+
+  // DM context: post the link directly in the DM.
   try {
     const linkResult = await api.createLinkToken({
       platform,
@@ -232,39 +273,21 @@ async function handleUnlinkedServer(
       platformUsername: message.author.fullName ?? message.author.userName,
     });
 
-    const setupMessage = isDirect
-      ? `To use AutoPilot, link ${contextLabel} to AutoGPT:\n\n${linkResult.link_url}\n\nThis link expires in 30 minutes.`
-      : `To set up AutoPilot for ${contextLabel}, connect your AutoGPT account.\n\nOnce linked, everyone here can use AutoPilot — usage appears in your AutoGPT account.\n\n${linkResult.link_url}\n\nThis link expires in 30 minutes.`;
-
-    if (isDirect) {
-      // Already in a DM — post the link directly in this conversation
-      await thread.post(setupMessage);
-    } else {
-      // In a group — try to DM so the link isn't public, fall back to group post
-      const dmSent = await tryDM(bot, message, setupMessage);
-      if (dmSent) {
-        await thread.post(
-          `I've sent you a DM with a setup link! Once connected, everyone here can chat with AutoPilot.`,
-        );
-      } else {
-        await thread.post(setupMessage);
-      }
-    }
-
+    await thread.post(
+      `To use AutoPilot, link your account to AutoGPT:\n\n${linkResult.link_url}\n\nThis link expires in 30 minutes.`,
+    );
     await thread.setState({ pendingLinkToken: linkResult.token });
   } catch (err) {
     if (err instanceof PlatformAPIError && err.status === 409) {
-      // Race condition: server was linked between resolve and createLinkToken
       const resolved = await api.resolve(platform, serverId);
       if (resolved.linked) {
         await thread.subscribe();
         await handleCoPilotMessage(
-          thread, message.text, platform, serverId, message.author.userId, api,
+          thread, message, platform, serverId, message.author.userId, api,
         );
         return;
       }
     }
-
     console.error("[bot] Failed to create link token:", err);
     await thread.post(
       "Sorry, I couldn't set up account linking right now. Please try again later.",
@@ -276,18 +299,49 @@ async function handleUnlinkedServer(
  * Forward a message to CoPilot and post the response.
  * Each (server, platform_user) pair gets its own session under the owner's account.
  */
+/**
+ * Prefix the user's message with a platform identity block so the LLM knows
+ * who is speaking. Without this, CoPilot falls back to the server owner's
+ * profile and treats every user in the server as the same person.
+ */
+function withUserIdentity(
+  text: string,
+  platform: string,
+  platformUserId: string,
+  username: string | undefined,
+): string {
+  const displayPlatform =
+    { discord: "Discord", telegram: "Telegram", slack: "Slack" }[platform] ??
+    platform;
+  // Deliberately no "@" prefix on the username — the LLM copies that format
+  // into its replies as "<@username>" which Discord won't render as a real
+  // mention (mentions require the numeric ID). Plain name is safer.
+  const who = username
+    ? `${username} (${displayPlatform} user ID: ${platformUserId})`
+    : `${displayPlatform} user ID: ${platformUserId}`;
+  return `[Message sent by ${who}]\n${text}`;
+}
+
 async function handleCoPilotMessage(
   thread: BotThread,
-  text: string,
+  message: Message,
   platform: string,
   serverId: string,
   platformUserId: string,
   api: PlatformAPI,
 ) {
+  const username = message.author.userName ?? message.author.fullName;
+  const text = withUserIdentity(message.text, platform, platformUserId, username);
+
   const state = await thread.state;
   let sessionId = state?.sessionId;
 
+  // Discord's typing indicator clears after ~10s. Re-fire it on a loop so the
+  // user sees "bot is typing" the whole time CoPilot is working.
   await thread.startTyping();
+  const typingInterval = setInterval(() => {
+    void thread.startTyping().catch(() => {});
+  }, 8_000);
 
   try {
     if (!sessionId) {
@@ -322,6 +376,8 @@ async function handleCoPilotMessage(
     await thread.post(
       "Sorry, I ran into an issue processing your message. Please try again.",
     );
+  } finally {
+    clearInterval(typingInterval);
   }
 }
 

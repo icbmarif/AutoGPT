@@ -12,6 +12,12 @@ config();
 
 import { loadConfig } from "./config.js";
 import { createBot } from "./bot.js";
+import { PlatformAPI } from "./platform-api.js";
+import {
+  InteractionRegistry,
+  tryDispatchInteraction,
+} from "./discord/interactions.js";
+import { registerHandlers } from "./discord/handlers.js";
 
 const PORT = parseInt(process.env.PORT ?? "3001", 10);
 
@@ -41,9 +47,13 @@ async function main() {
   }
 
   const bot = await createBot(cfg, stateAdapter);
+  const api = new PlatformAPI(cfg.autogptApiUrl);
+
+  const registry = new InteractionRegistry();
+  registerHandlers(registry);
 
   // Start HTTP server for webhook requests
-  await startServer(bot, PORT);
+  await startServer(bot, api, registry, PORT);
 
   // Initialize all adapters — required for Telegram polling and Discord Gateway
   await bot.initialize();
@@ -99,7 +109,12 @@ async function runGatewayLoop(discord: NonNullable<Awaited<ReturnType<typeof cre
   }
 }
 
-async function startServer(bot: Awaited<ReturnType<typeof createBot>>, port: number) {
+async function startServer(
+  bot: Awaited<ReturnType<typeof createBot>>,
+  api: PlatformAPI,
+  registry: InteractionRegistry,
+  port: number,
+) {
   const { createServer } = await import("http");
 
   const server = createServer(async (req, res) => {
@@ -122,6 +137,18 @@ async function startServer(bot: Awaited<ReturnType<typeof createBot>>, port: num
 
     // Route: /api/webhooks/{platform}
     const platform = url.pathname.split("/").pop();
+
+    // Intercept Gateway-forwarded Discord interactions before the SDK drops
+    // them (the SDK's default handler only processes MESSAGE_CREATE).
+    if (platform === "discord") {
+      const intercepted = await tryDispatchInteraction(request, registry, api);
+      if (intercepted) {
+        res.writeHead(intercepted.status, Object.fromEntries(intercepted.headers));
+        res.end(Buffer.from(await intercepted.arrayBuffer()));
+        return;
+      }
+    }
+
     const handler = platform
       ? (bot.webhooks as Record<string, ((r: Request) => Promise<Response>) | undefined>)[platform]
       : undefined;

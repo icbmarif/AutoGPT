@@ -6,7 +6,11 @@
  */
 
 const DEFAULT_TIMEOUT_MS = 30_000;
-const SSE_TIMEOUT_MS = 120_000;
+// Idle timeout: abort only if no data arrives for this long. Backend sends
+// `: keepalive\n\n` every 30s, so 90s gives 3 missed keepalives of headroom.
+// CoPilot turns can legitimately take many minutes — a hard deadline would kill
+// long-running tool calls mid-flight.
+const SSE_IDLE_TIMEOUT_MS = 90_000;
 
 export class PlatformAPIError extends Error {
   constructor(
@@ -168,7 +172,12 @@ export class PlatformAPI {
     sessionId?: string,
   ): AsyncGenerator<string> {
     const abort = new AbortController();
-    const timeout = setTimeout(() => abort.abort(), SSE_TIMEOUT_MS);
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const resetIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => abort.abort(), SSE_IDLE_TIMEOUT_MS);
+    };
+    resetIdleTimer();
 
     let res: Response;
     try {
@@ -185,17 +194,17 @@ export class PlatformAPI {
         signal: abort.signal,
       });
     } catch (err) {
-      clearTimeout(timeout);
+      if (idleTimer) clearTimeout(idleTimer);
       throw err;
     }
 
     if (!res.ok) {
-      clearTimeout(timeout);
+      if (idleTimer) clearTimeout(idleTimer);
       throw new PlatformAPIError(res.status, await res.text());
     }
 
     if (!res.body) {
-      clearTimeout(timeout);
+      if (idleTimer) clearTimeout(idleTimer);
       throw new PlatformAPIError(0, "No response body for SSE stream");
     }
 
@@ -208,6 +217,7 @@ export class PlatformAPI {
         const { done, value } = await reader.read();
         if (done) break;
 
+        resetIdleTimer();
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
@@ -231,7 +241,7 @@ export class PlatformAPI {
         }
       }
     } finally {
-      clearTimeout(timeout);
+      if (idleTimer) clearTimeout(idleTimer);
       reader.releaseLock();
     }
   }
