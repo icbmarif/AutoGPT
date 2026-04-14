@@ -32,7 +32,7 @@ _FORWARDED_FIELDS = ("session_id", "step", "status", "graph_id", "execution_id")
 
 def _build_push_payload(payload: NotificationPayload) -> str:
     """Build a compact JSON payload (<4KB) for the push message."""
-    data = payload.model_dump()
+    data = payload.model_dump(mode="json")
     compact: dict[str, object] = {
         "type": data.get("type", ""),
         "event": data.get("event", ""),
@@ -52,7 +52,9 @@ async def send_push_for_user(user_id: str, payload: NotificationPayload) -> None
     """
     vapid_private = _settings.secrets.vapid_private_key
     vapid_public = _settings.secrets.vapid_public_key
-    if not vapid_private or not vapid_public:
+    vapid_claim_email = _settings.secrets.vapid_claim_email
+    if not vapid_private or not vapid_public or not vapid_claim_email:
+        logger.debug("VAPID keys not fully configured, skipping push")
         return
 
     now = time.monotonic()
@@ -67,9 +69,7 @@ async def send_push_for_user(user_id: str, payload: NotificationPayload) -> None
         return
 
     push_data = _build_push_payload(payload)
-    vapid_claims: dict[str, str | int] = {
-        "sub": _settings.secrets.vapid_claim_email,
-    }
+    vapid_claims: dict[str, str | int] = {"sub": vapid_claim_email}
 
     async def _send_one(sub: PushSubscription) -> None:
         try:
@@ -91,10 +91,10 @@ async def send_push_for_user(user_id: str, payload: NotificationPayload) -> None
                     status,
                     sub.endpoint[:60],
                 )
-                await delete_push_subscription_by_endpoint(sub.endpoint)
+                await delete_push_subscription_by_endpoint(sub.userId, sub.endpoint)
             else:
                 logger.warning("Push failed for %s: %s", sub.endpoint[:60], e)
-                await increment_fail_count(sub.endpoint)
+                await increment_fail_count(sub.userId, sub.endpoint)
         except Exception:
             logger.exception("Unexpected error sending push to %s", sub.endpoint[:60])
 

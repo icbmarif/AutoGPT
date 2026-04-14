@@ -48,14 +48,16 @@ async def delete_push_subscription(user_id: str, endpoint: str) -> None:
     )
 
 
-async def delete_push_subscription_by_endpoint(endpoint: str) -> None:
+async def delete_push_subscription_by_endpoint(user_id: str, endpoint: str) -> None:
     """Remove a stale subscription (e.g. 410 Gone from push service)."""
-    await PushSubscription.prisma().delete_many(where={"endpoint": endpoint})
+    await PushSubscription.prisma().delete_many(
+        where={"userId": user_id, "endpoint": endpoint}
+    )
 
 
-async def increment_fail_count(endpoint: str) -> None:
+async def increment_fail_count(user_id: str, endpoint: str) -> None:
     await PushSubscription.prisma().update_many(
-        where={"endpoint": endpoint},
+        where={"userId": user_id, "endpoint": endpoint},
         data={
             "failCount": {"increment": 1},
             "lastFailedAt": datetime.now(timezone.utc),

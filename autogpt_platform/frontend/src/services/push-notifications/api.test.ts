@@ -7,7 +7,7 @@ import {
 
 vi.mock("@/services/environment", () => ({
   environment: {
-    getAGPTServerApiUrl: () => "http://localhost:8006/api",
+    getAGPTServerBaseUrl: () => "http://localhost:8006",
   },
 }));
 

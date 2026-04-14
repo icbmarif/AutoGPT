@@ -106,10 +106,36 @@ self.addEventListener("notificationclick", function (event) {
 
 self.addEventListener("pushsubscriptionchange", function (event) {
   event.waitUntil(
-    self.clients.matchAll({ type: "window" }).then(function (clientList) {
-      for (var i = 0; i < clientList.length; i++) {
-        clientList[i].postMessage({ type: "PUSH_SUBSCRIPTION_CHANGED" });
-      }
-    }),
+    Promise.resolve(
+      event.newSubscription ||
+        self.registration.pushManager.subscribe(
+          event.oldSubscription
+            ? { userVisibleOnly: true, applicationServerKey: event.oldSubscription.options.applicationServerKey }
+            : { userVisibleOnly: true },
+        ),
+    )
+      .then(function (newSub) {
+        if (!newSub) return;
+        return fetch("/api/proxy/api/push/subscribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            endpoint: newSub.endpoint,
+            keys: {
+              p256dh: btoa(String.fromCharCode.apply(null, new Uint8Array(newSub.getKey("p256dh")))),
+              auth: btoa(String.fromCharCode.apply(null, new Uint8Array(newSub.getKey("auth")))),
+            },
+            user_agent: navigator.userAgent || "",
+          }),
+        });
+      })
+      .catch(function () {
+        // If re-subscription fails, notify open clients so they can retry
+        self.clients.matchAll({ type: "window" }).then(function (clientList) {
+          for (var i = 0; i < clientList.length; i++) {
+            clientList[i].postMessage({ type: "PUSH_SUBSCRIPTION_CHANGED" });
+          }
+        });
+      }),
   );
 });

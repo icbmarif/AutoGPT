@@ -1,6 +1,6 @@
 import { environment } from "@/services/environment";
 
-const API_BASE = environment.getAGPTServerApiUrl().replace("/api", "");
+const API_BASE = environment.getAGPTServerBaseUrl();
 
 export async function fetchVapidPublicKey(): Promise<string | null> {
   try {
