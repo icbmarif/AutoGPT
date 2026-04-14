@@ -70,15 +70,18 @@ function makeSubscription({
   tier = "FREE",
   monthlyCost = 0,
   tierCosts = { FREE: 0, PRO: 1999, BUSINESS: 4999, ENTERPRISE: 0 },
+  prorationCreditCents = 0,
 }: {
   tier?: string;
   monthlyCost?: number;
   tierCosts?: Record<string, number>;
+  prorationCreditCents?: number;
 } = {}) {
   return {
     tier,
     monthly_cost: monthlyCost,
     tier_costs: tierCosts,
+    proration_credit_cents: prorationCreditCents,
   };
 }
 
@@ -193,14 +196,19 @@ describe("SubscriptionTierSection", () => {
     expect(screen.getAllByText("Pricing available soon")).toHaveLength(2);
   });
 
-  it("calls changeTier on upgrade click without confirmation", async () => {
+  it("calls changeTier on upgrade click after confirmation dialog", async () => {
     const mutateFn = vi
       .fn()
       .mockResolvedValue({ status: 200, data: { url: "" } });
     setupMocks({ mutateFn });
     render(<SubscriptionTierSection />);
 
+    // Clicking upgrade opens the confirmation dialog first
     fireEvent.click(screen.getByRole("button", { name: /upgrade to pro/i }));
+    // Confirm via the dialog's "Continue to Checkout" button
+    fireEvent.click(
+      screen.getByRole("button", { name: /continue to checkout/i }),
+    );
 
     await waitFor(() => {
       expect(mutateFn).toHaveBeenCalledWith(
@@ -268,7 +276,11 @@ describe("SubscriptionTierSection", () => {
     setupMocks({ mutateFn });
     render(<SubscriptionTierSection />);
 
+    // Upgrade opens confirmation dialog first — confirm via "Continue to Checkout"
     fireEvent.click(screen.getByRole("button", { name: /upgrade to pro/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /continue to checkout/i }),
+    );
 
     await waitFor(() => {
       expect(mockLocation.href).toBe("https://checkout.stripe.com/pay/cs_test");
@@ -282,7 +294,11 @@ describe("SubscriptionTierSection", () => {
     setupMocks({ mutateFn });
     render(<SubscriptionTierSection />);
 
+    // Upgrade opens confirmation dialog first — confirm to trigger the mutation
     fireEvent.click(screen.getByRole("button", { name: /upgrade to pro/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /continue to checkout/i }),
+    );
 
     await waitFor(() => {
       expect(screen.getByRole("alert")).toBeDefined();
