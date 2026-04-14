@@ -14,7 +14,7 @@ from fastapi import Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from backend.api.features.store.exceptions import VirusDetectedError
+from backend.api.features.store.exceptions import VirusDetectedError, VirusScanError
 from backend.copilot.rate_limit import get_workspace_storage_limit_bytes
 from backend.data.workspace import (
     WorkspaceFile,
@@ -250,6 +250,8 @@ async def upload_file(
         )
     except VirusDetectedError as e:
         raise fastapi.HTTPException(status_code=400, detail=str(e)) from e
+    except VirusScanError as e:
+        raise fastapi.HTTPException(status_code=500, detail=str(e)) from e
     except ValueError as e:
         # write_file raises ValueError for path-conflict, size-limit, and
         # storage-quota cases; map each to its correct HTTP status.

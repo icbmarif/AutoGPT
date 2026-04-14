@@ -9,6 +9,7 @@ from redis.exceptions import RedisError
 from .rate_limit import (
     DEFAULT_TIER,
     TIER_MULTIPLIERS,
+    TIER_WORKSPACE_STORAGE_MB,
     CoPilotUsageStatus,
     RateLimitExceeded,
     SubscriptionTier,
@@ -23,6 +24,7 @@ from .rate_limit import (
     get_global_rate_limits,
     get_usage_status,
     get_user_tier,
+    get_workspace_storage_limit_bytes,
     increment_daily_reset_count,
     record_token_usage,
     release_reset_lock,
@@ -1367,3 +1369,52 @@ class TestResetUserUsage:
         ):
             with pytest.raises(RedisError):
                 await reset_user_usage("user-1")
+
+
+class TestWorkspaceStorageLimits:
+    """Tests for tier-based workspace storage limits."""
+
+    @pytest.mark.parametrize(
+        "tier,expected_mb",
+        [
+            (SubscriptionTier.FREE, 250),
+            (SubscriptionTier.PRO, 1024),
+            (SubscriptionTier.BUSINESS, 5 * 1024),
+            (SubscriptionTier.ENTERPRISE, 15 * 1024),
+        ],
+    )
+    def test_tier_workspace_storage_mapping_covers_all_tiers(self, tier, expected_mb):
+        """Every tier has an explicit storage limit in the mapping."""
+        assert tier in TIER_WORKSPACE_STORAGE_MB
+        assert TIER_WORKSPACE_STORAGE_MB[tier] == expected_mb
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "tier,expected_bytes",
+        [
+            (SubscriptionTier.FREE, 250 * 1024 * 1024),
+            (SubscriptionTier.PRO, 1024 * 1024 * 1024),
+            (SubscriptionTier.BUSINESS, 5 * 1024 * 1024 * 1024),
+            (SubscriptionTier.ENTERPRISE, 15 * 1024 * 1024 * 1024),
+        ],
+    )
+    async def test_get_workspace_storage_limit_bytes_per_tier(
+        self, tier, expected_bytes
+    ):
+        """get_workspace_storage_limit_bytes returns correct bytes for each tier."""
+        with patch(
+            "backend.copilot.rate_limit.get_user_tier",
+            return_value=tier,
+        ):
+            result = await get_workspace_storage_limit_bytes("user-1")
+        assert result == expected_bytes
+
+    @pytest.mark.asyncio
+    async def test_get_workspace_storage_limit_bytes_defaults_to_free_on_unknown(self):
+        """Unknown tier falls back to FREE tier limit."""
+        with patch(
+            "backend.copilot.rate_limit.get_user_tier",
+            return_value="UNKNOWN_TIER",
+        ):
+            result = await get_workspace_storage_limit_bytes("user-1")
+        assert result == 250 * 1024 * 1024

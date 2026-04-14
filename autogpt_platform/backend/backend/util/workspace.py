@@ -186,27 +186,7 @@ class WorkspaceManager:
                 f"{Config().max_file_size_mb}MB limit"
             )
 
-        # Enforce per-user workspace storage quota (tier-based).
-        storage_limit = await get_workspace_storage_limit_bytes(self.user_id)
-        current_usage = await get_workspace_total_size(self.workspace_id)
-        if current_usage + len(content) > storage_limit:
-            used_pct = (current_usage / storage_limit) * 100
-            raise ValueError(
-                f"Storage limit exceeded: {current_usage:,} bytes used "
-                f"of {storage_limit:,} bytes ({used_pct:.1f}%)"
-            )
-        if storage_limit and (current_usage + len(content)) / storage_limit >= 0.8:
-            logger.warning(
-                f"User {self.user_id} workspace storage at "
-                f"{(current_usage + len(content)) / storage_limit * 100:.1f}% "
-                f"({current_usage + len(content)} / {storage_limit} bytes)"
-            )
-
-        # Scan here — callers must NOT duplicate this scan.
-        # WorkspaceManager owns virus scanning for all persisted files.
-        await scan_content_safe(content, filename=filename)
-
-        # Determine path with session scoping
+        # Determine path with session scoping (needed before quota check for overwrites)
         if path is None:
             path = f"/{filename}"
         elif not path.startswith("/"):
@@ -214,6 +194,35 @@ class WorkspaceManager:
 
         # Resolve path with session prefix
         path = self._resolve_path(path)
+
+        # Enforce per-user workspace storage quota (tier-based).
+        # For overwrites, subtract the existing file's size so replacing a file
+        # with a same-size or smaller file is not rejected near the cap.
+        storage_limit = await get_workspace_storage_limit_bytes(self.user_id)
+        current_usage = await get_workspace_total_size(self.workspace_id)
+        if overwrite:
+            db = workspace_db()
+            existing = await db.get_workspace_file_by_path(self.workspace_id, path)
+            if existing is not None:
+                current_usage = max(0, current_usage - existing.size_bytes)
+
+        projected_usage = current_usage + len(content)
+        if projected_usage > storage_limit:
+            used_pct = (current_usage / storage_limit) * 100
+            raise ValueError(
+                f"Storage limit exceeded: {current_usage:,} bytes used "
+                f"of {storage_limit:,} bytes ({used_pct:.1f}%)"
+            )
+        if projected_usage / storage_limit >= 0.8:
+            logger.warning(
+                f"User {self.user_id} workspace storage at "
+                f"{projected_usage / storage_limit * 100:.1f}% "
+                f"({projected_usage} / {storage_limit} bytes)"
+            )
+
+        # Scan here — callers must NOT duplicate this scan.
+        # WorkspaceManager owns virus scanning for all persisted files.
+        await scan_content_safe(content, filename=filename)
 
         # Check if file exists at path (only error for non-overwrite case)
         # For overwrite=True, we let the write proceed and handle via UniqueViolationError

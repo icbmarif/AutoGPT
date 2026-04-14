@@ -171,3 +171,103 @@ async def test_write_file_overwrite_exhausted_retries_raises_and_cleans_up(
             )
 
     mock_storage.delete.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_write_file_quota_exceeded_raises_value_error(
+    manager, mock_storage, mock_db
+):
+    """write_file raises ValueError when workspace storage quota is exceeded."""
+    mock_db.get_workspace_file_by_path.return_value = None
+
+    with (
+        patch(
+            "backend.util.workspace.get_workspace_storage",
+            return_value=mock_storage,
+        ),
+        patch("backend.util.workspace.workspace_db", return_value=mock_db),
+        patch("backend.util.workspace.scan_content_safe", new_callable=AsyncMock),
+        patch(
+            "backend.util.workspace.get_workspace_storage_limit_bytes",
+            return_value=250 * 1024 * 1024,  # 250 MB limit
+        ),
+        patch(
+            "backend.util.workspace.get_workspace_total_size",
+            return_value=250 * 1024 * 1024,  # already at limit
+        ),
+    ):
+        with pytest.raises(ValueError, match="Storage limit exceeded"):
+            await manager.write_file(filename="test.txt", content=b"hello")
+
+    # Storage should NOT have been written to
+    mock_storage.store.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_write_file_80pct_warning_logged(manager, mock_storage, mock_db, caplog):
+    """write_file logs a warning when workspace usage crosses 80%."""
+    created_file = _make_workspace_file()
+    mock_db.get_workspace_file_by_path.return_value = None
+    mock_db.create_workspace_file.return_value = created_file
+
+    limit_bytes = 100  # 100 bytes total limit
+    current_usage = 75  # 75 bytes used → 75% before write
+    content = b"123456"  # 6 bytes → 81% after write
+
+    with (
+        patch(
+            "backend.util.workspace.get_workspace_storage",
+            return_value=mock_storage,
+        ),
+        patch("backend.util.workspace.workspace_db", return_value=mock_db),
+        patch("backend.util.workspace.scan_content_safe", new_callable=AsyncMock),
+        patch(
+            "backend.util.workspace.get_workspace_storage_limit_bytes",
+            return_value=limit_bytes,
+        ),
+        patch(
+            "backend.util.workspace.get_workspace_total_size",
+            return_value=current_usage,
+        ),
+    ):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="backend.util.workspace"):
+            await manager.write_file(filename="test.txt", content=content)
+
+    assert any("workspace storage at" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_write_file_overwrite_not_double_counted(manager, mock_storage, mock_db):
+    """Overwriting a file subtracts the old file size from usage check."""
+    existing_file = _make_workspace_file(size_bytes=50)
+    created_file = _make_workspace_file()
+    mock_db.get_workspace_file_by_path.return_value = existing_file
+    mock_db.create_workspace_file.return_value = created_file
+
+    limit_bytes = 100
+    current_usage = 90  # 90 bytes used, 50 of which is the file being replaced
+    content = b"x" * 50  # replacing with same-size file — should succeed
+
+    with (
+        patch(
+            "backend.util.workspace.get_workspace_storage",
+            return_value=mock_storage,
+        ),
+        patch("backend.util.workspace.workspace_db", return_value=mock_db),
+        patch("backend.util.workspace.scan_content_safe", new_callable=AsyncMock),
+        patch(
+            "backend.util.workspace.get_workspace_storage_limit_bytes",
+            return_value=limit_bytes,
+        ),
+        patch(
+            "backend.util.workspace.get_workspace_total_size",
+            return_value=current_usage,
+        ),
+    ):
+        # Should NOT raise — net usage after overwrite is 90 - 50 + 50 = 90, under 100
+        result = await manager.write_file(
+            filename="test.txt", content=content, overwrite=True
+        )
+    assert result == created_file

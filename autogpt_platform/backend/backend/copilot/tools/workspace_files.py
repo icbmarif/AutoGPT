@@ -19,7 +19,6 @@ from backend.copilot.context import (
 from backend.copilot.model import ChatSession
 from backend.copilot.tools.sandbox import make_session_path
 from backend.util.settings import Config
-from backend.util.virus_scanner import scan_content_safe
 from backend.util.workspace import WorkspaceManager
 
 from .base import BaseTool
@@ -837,7 +836,6 @@ class WriteWorkspaceFileTool(BaseTool):
             )
 
         try:
-            await scan_content_safe(content_bytes, filename=filename)
             manager = await get_workspace_manager(user_id, session_id)
             rec = await manager.write_file(
                 content=content_bytes,

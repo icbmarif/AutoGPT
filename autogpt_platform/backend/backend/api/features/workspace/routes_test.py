@@ -582,3 +582,51 @@ def test_list_files_offset_is_echoed_back(mock_manager_cls, mock_get_workspace):
     mock_instance.list_files.assert_called_once_with(
         limit=11, offset=50, include_all_sessions=True
     )
+
+
+def test_upload_virus_scan_infrastructure_error_returns_500(mocker):
+    """VirusScanError (ClamAV outage) should return 500, not 409."""
+    from backend.api.features.store.exceptions import VirusScanError
+
+    mocker.patch(
+        "backend.api.features.workspace.routes.get_or_create_workspace",
+        return_value=_make_workspace(),
+    )
+    mock_manager = mocker.MagicMock()
+    mock_manager.write_file = mocker.AsyncMock(
+        side_effect=VirusScanError("ClamAV connection refused"),
+    )
+    mocker.patch(
+        "backend.api.features.workspace.routes.WorkspaceManager",
+        return_value=mock_manager,
+    )
+
+    response = _upload()
+    assert response.status_code == 500
+
+
+def test_get_storage_usage_returns_tier_based_limit(mocker):
+    """get_storage_usage should return the user's tier-based limit, not a static config."""
+    mocker.patch(
+        "backend.api.features.workspace.routes.get_or_create_workspace",
+        return_value=_make_workspace(),
+    )
+    mocker.patch(
+        "backend.api.features.workspace.routes.get_workspace_total_size",
+        return_value=100 * 1024 * 1024,  # 100 MB used
+    )
+    mocker.patch(
+        "backend.api.features.workspace.routes.count_workspace_files",
+        return_value=5,
+    )
+    mocker.patch(
+        "backend.api.features.workspace.routes.get_workspace_storage_limit_bytes",
+        return_value=1024 * 1024 * 1024,  # 1 GB (PRO tier)
+    )
+
+    response = client.get("/storage/usage")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["limit_bytes"] == 1024 * 1024 * 1024
+    assert data["used_bytes"] == 100 * 1024 * 1024
+    assert data["file_count"] == 5
