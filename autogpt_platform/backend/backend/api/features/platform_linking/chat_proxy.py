@@ -32,7 +32,7 @@ from backend.copilot.model import (
 )
 from backend.copilot.response_model import StreamFinish
 
-from . import find_server_link, find_user_link, redact_id
+from . import find_server_link, find_user_link
 from .auth import check_bot_api_key, get_bot_api_key
 from .models import BotChatRequest, BotChatSessionResponse
 
@@ -84,10 +84,9 @@ async def bot_create_session(
     session = await create_chat_session(owner_user_id, dry_run=False)
 
     logger.info(
-        "Bot created session %s for %s user %s (server %s, owner ...%s)",
+        "Bot created session %s for %s (server %s, owner ...%s)",
         session.session_id,
         request.platform.value,
-        redact_id(request.platform_user_id),
         request.platform_server_id or "DM",
         owner_user_id[-8:],
     )
@@ -133,9 +132,8 @@ async def bot_chat_stream(
     subscribe_from_id = "0-0"
 
     logger.info(
-        "Bot chat: %s user %s, server %s, session %s, turn %s (owner ...%s)",
+        "Bot chat: %s (server %s, session %s, turn %s, owner ...%s)",
         request.platform.value,
-        redact_id(request.platform_user_id),
         request.platform_server_id or "DM",
         session_id,
         turn_id,

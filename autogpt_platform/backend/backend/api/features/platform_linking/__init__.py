@@ -3,17 +3,6 @@
 from prisma.models import PlatformLink, PlatformUserLink
 
 
-def redact_id(value: str | None) -> str:
-    """Redact a platform / user identifier for logs.
-
-    Keeps the last 4 chars for correlation without exposing the full
-    third-party ID as PII.
-    """
-    if not value:
-        return "<none>"
-    return f"...{value[-4:]}" if len(value) > 4 else "***"
-
-
 async def find_server_link(
     platform: str,
     platform_server_id: str,

@@ -22,7 +22,7 @@ from autogpt_libs import auth
 from fastapi import APIRouter, HTTPException, Path, Security
 from prisma.models import PlatformLink, PlatformLinkToken, PlatformUserLink
 
-from . import find_server_link, find_user_link, redact_id
+from . import find_server_link, find_user_link
 from .auth import check_bot_api_key, get_bot_api_key
 from .models import (
     ConfirmLinkResponse,
@@ -174,9 +174,8 @@ async def create_user_link_token(
     )
 
     logger.info(
-        "Created USER link token for %s user %s (expires %s)",
+        "Created USER link token for %s (expires %s)",
         platform,
-        redact_id(request.platform_user_id),
         expires_at.isoformat(),
     )
 
@@ -331,11 +330,10 @@ async def confirm_link_token(
         raise
 
     logger.info(
-        "Linked %s server %s to user ...%s (owner: %s)",
+        "Linked %s server %s to user ...%s",
         link_token.platform,
         link_token.platformServerId,
         user_id[-8:],
-        redact_id(link_token.platformUserId),
     )
 
     return ConfirmLinkResponse(
@@ -386,9 +384,8 @@ async def confirm_user_link_token(
         raise
 
     logger.info(
-        "Linked %s user %s DMs to AutoGPT user ...%s",
+        "Linked %s DMs to AutoGPT user ...%s",
         link_token.platform,
-        redact_id(link_token.platformUserId),
         user_id[-8:],
     )
 
@@ -494,9 +491,8 @@ async def delete_user_link(
 
     await PlatformUserLink.prisma().delete(where={"id": link_id})
     logger.info(
-        "Unlinked %s DMs for user %s from AutoGPT user ...%s",
+        "Unlinked %s DMs from AutoGPT user ...%s",
         link.platform,
-        redact_id(link.platformUserId),
         user_id[-8:],
     )
     return DeleteLinkResponse(success=True)

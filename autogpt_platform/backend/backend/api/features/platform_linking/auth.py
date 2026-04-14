@@ -5,11 +5,18 @@ import logging
 import os
 from functools import lru_cache
 
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Security
+from fastapi.security import APIKeyHeader
 
 from backend.util.settings import Settings
 
 logger = logging.getLogger(__name__)
+
+
+# APIKeyHeader lets FastAPI emit a proper `X-Bot-API-Key` security scheme in
+# the OpenAPI spec. auto_error=False because dev-mode allows keyless requests
+# when enable_auth is False — we surface a 401 ourselves in check_bot_api_key.
+_bot_api_key_scheme = APIKeyHeader(name="X-Bot-API-Key", auto_error=False)
 
 
 @lru_cache(maxsize=1)
@@ -23,9 +30,15 @@ def _auth_enabled() -> bool:
     return Settings().config.enable_auth
 
 
-async def get_bot_api_key(request: Request) -> str | None:
-    """Extract the bot API key from the X-Bot-API-Key header."""
-    return request.headers.get("x-bot-api-key")
+async def get_bot_api_key(
+    api_key: str | None = Security(_bot_api_key_scheme),
+) -> str | None:
+    """Extract the bot API key from the X-Bot-API-Key header.
+
+    Declared via APIKeyHeader so routes using ``Security(get_bot_api_key)``
+    get the X-Bot-API-Key scheme on their OpenAPI operation.
+    """
+    return api_key
 
 
 def check_bot_api_key(api_key: str | None) -> None:

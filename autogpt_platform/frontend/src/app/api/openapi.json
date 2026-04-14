@@ -6083,7 +6083,8 @@
               }
             }
           }
-        }
+        },
+        "security": [{ "APIKeyHeader": [] }]
       }
     },
     "/api/platform-linking/chat/stream": {
@@ -6113,7 +6114,8 @@
               }
             }
           }
-        }
+        },
+        "security": [{ "APIKeyHeader": [] }]
       }
     },
     "/api/platform-linking/links": {
@@ -6209,7 +6211,8 @@
               }
             }
           }
-        }
+        },
+        "security": [{ "APIKeyHeader": [] }]
       }
     },
     "/api/platform-linking/resolve-user": {
@@ -6243,7 +6246,8 @@
               }
             }
           }
-        }
+        },
+        "security": [{ "APIKeyHeader": [] }]
       }
     },
     "/api/platform-linking/tokens": {
@@ -6279,7 +6283,8 @@
               }
             }
           }
-        }
+        },
+        "security": [{ "APIKeyHeader": [] }]
       }
     },
     "/api/platform-linking/tokens/{token}/confirm": {
@@ -6372,6 +6377,7 @@
         "summary": "Check if a link token has been consumed",
         "description": "Bot polls to check if the user has completed linking.",
         "operationId": "getPlatform-linkingCheck if a link token has been consumed",
+        "security": [{ "APIKeyHeader": [] }],
         "parameters": [
           {
             "name": "token",
@@ -6504,7 +6510,8 @@
               }
             }
           }
-        }
+        },
+        "security": [{ "APIKeyHeader": [] }]
       }
     },
     "/api/platform-linking/user-tokens/{token}/confirm": {
@@ -16868,6 +16875,11 @@
         "type": "apiKey",
         "in": "header",
         "name": "X-Postmark-Webhook-Token"
+      },
+      "APIKeyHeader": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Bot-API-Key"
       },
       "HTTPBearer": { "type": "http", "scheme": "bearer" },
       "HTTPBearerJWT": {
