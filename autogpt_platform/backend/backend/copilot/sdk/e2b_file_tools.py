@@ -14,6 +14,7 @@ by the separate ``Read`` MCP tool registered in ``tool_adapter.py``.
 
 import asyncio
 import base64
+import collections
 import hashlib
 import itertools
 import json
@@ -45,7 +46,10 @@ _DEFAULT_READ_LIMIT = 2000
 # When MCP tools are dispatched in parallel (readOnlyHint=True annotation),
 # two Edit calls on the same file could race through read-modify-write
 # and silently drop one change.  Keyed by resolved absolute path.
-_edit_locks: dict[str, asyncio.Lock] = {}
+# Bounded to _EDIT_LOCKS_MAX entries (LRU eviction) to prevent unbounded
+# memory growth across long-running server processes.
+_EDIT_LOCKS_MAX = 1_000
+_edit_locks: collections.OrderedDict[str, asyncio.Lock] = collections.OrderedDict()
 
 # Inline content above this threshold triggers a warning — it survived this
 # time but is dangerously close to the API output-token truncation limit.
@@ -519,7 +523,15 @@ async def _handle_edit_file(args: dict[str, Any]) -> dict[str, Any]:
 
     # Per-path lock prevents parallel edits from racing through
     # the read-modify-write cycle and silently dropping changes.
-    lock = _edit_locks.setdefault(resolved, asyncio.Lock())
+    # LRU-bounded: evict the oldest entry when the dict is full so that
+    # _edit_locks does not grow unboundedly in long-running server processes.
+    if resolved not in _edit_locks:
+        if len(_edit_locks) >= _EDIT_LOCKS_MAX:
+            _edit_locks.popitem(last=False)
+        _edit_locks[resolved] = asyncio.Lock()
+    else:
+        _edit_locks.move_to_end(resolved)
+    lock = _edit_locks[resolved]
     async with lock:
         try:
             with open(resolved, encoding="utf-8") as f:
