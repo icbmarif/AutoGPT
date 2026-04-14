@@ -1195,6 +1195,13 @@ class OrchestratorBlock(Block):
                     )
                 except InsufficientBalanceError:
                     # IBE must propagate — see OrchestratorBlock class docstring.
+                    # Log the billing failure here so the discarded tool result
+                    # is traceable before the loop aborts.
+                    logger.warning(
+                        "Insufficient balance charging for tool node %s after "
+                        "successful execution; agent loop will be aborted",
+                        sink_node_id,
+                    )
                     raise
                 except Exception:
                     # Non-billing charge failures (DB outage, network, etc.)
