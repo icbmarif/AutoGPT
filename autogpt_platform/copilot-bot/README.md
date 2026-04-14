@@ -23,7 +23,7 @@ npm run dev                   # start the bot
 
 ## Architecture
 
-```
+```text
 src/
 ├── index.ts            # Entry point — HTTP server + Gateway loop
 ├── config.ts           # Environment-based configuration

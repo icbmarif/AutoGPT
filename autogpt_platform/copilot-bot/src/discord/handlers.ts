@@ -23,6 +23,18 @@ export function registerHandlers(registry: InteractionRegistry): void {
 // ── /setup ───────────────────────────────────────────────────────────────────
 
 async function handleSetup(ctx: InteractionContext): Promise<void> {
+  // /setup claims a server. Running it in a DM would create a SERVER link
+  // with server_id="@me" which is nonsense — reject with clear guidance.
+  if (ctx.guildId === "@me") {
+    await ctx.respond(
+      "Run `/setup` inside a server to link it. For 1:1 DM conversations " +
+        "with AutoPilot, just message me in this DM — I'll send you a " +
+        "personal link automatically.",
+      { ephemeral: true },
+    );
+    return;
+  }
+
   await ctx.defer({ ephemeral: true });
 
   try {

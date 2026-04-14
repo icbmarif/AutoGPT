@@ -264,12 +264,31 @@ async function handleCoPilotMessage(
       sessionId,
     });
 
-    let response = "";
-    for await (const chunk of stream) response += chunk;
+    // Discord caps message content at 2000 chars. We don't flush after every
+    // delta (that'd spam a dozen messages for a long answer and still be
+    // truncated mid-sentence), but we do flush whenever the buffer crosses
+    // a safe threshold at a paragraph/sentence boundary.
+    let buffer = "";
+    let posted = false;
+    for await (const delta of stream) {
+      buffer += delta;
+      if (buffer.length >= CHUNK_FLUSH_AT) {
+        const [toPost, rest] = splitForDiscord(buffer);
+        if (toPost.length) {
+          await thread.post(toPost);
+          posted = true;
+        }
+        buffer = rest;
+      }
+    }
 
-    if (response.trim()) {
-      await thread.post(response);
-    } else {
+    const tail = buffer.trim();
+    if (tail) {
+      await thread.post(tail);
+      posted = true;
+    }
+
+    if (!posted) {
       await thread.post(
         "I processed your message but didn't generate a response. Please try again.",
       );
@@ -286,6 +305,45 @@ async function handleCoPilotMessage(
 }
 
 // ── Misc helpers ─────────────────────────────────────────────────────────────
+
+/** Discord's hard cap is 2000; we flush a bit earlier to leave headroom. */
+const DISCORD_MAX_CONTENT_LENGTH = 1900;
+const CHUNK_FLUSH_AT = DISCORD_MAX_CONTENT_LENGTH;
+
+/**
+ * Split a buffered response into a postable chunk + leftover, preferring to
+ * break at a paragraph or sentence boundary inside the last 200 chars so we
+ * don't cut words / code blocks in half.
+ */
+function splitForDiscord(buffer: string): [string, string] {
+  if (buffer.length <= DISCORD_MAX_CONTENT_LENGTH) return [buffer, ""];
+
+  const head = buffer.slice(0, DISCORD_MAX_CONTENT_LENGTH);
+  const searchStart = Math.max(0, head.length - 200);
+
+  const paraBreak = head.lastIndexOf("\n\n", head.length - 1);
+  if (paraBreak >= searchStart) {
+    return [head.slice(0, paraBreak), buffer.slice(paraBreak + 2)];
+  }
+  const lineBreak = head.lastIndexOf("\n", head.length - 1);
+  if (lineBreak >= searchStart) {
+    return [head.slice(0, lineBreak), buffer.slice(lineBreak + 1)];
+  }
+  const sentenceBreak = Math.max(
+    head.lastIndexOf(". "),
+    head.lastIndexOf("! "),
+    head.lastIndexOf("? "),
+  );
+  if (sentenceBreak >= searchStart) {
+    return [head.slice(0, sentenceBreak + 1), buffer.slice(sentenceBreak + 2)];
+  }
+  const space = head.lastIndexOf(" ");
+  if (space >= searchStart) {
+    return [head.slice(0, space), buffer.slice(space + 1)];
+  }
+  // Fallback: hard cut. Better than failing the post entirely.
+  return [head, buffer.slice(DISCORD_MAX_CONTENT_LENGTH)];
+}
 
 function isHelpCommand(text: string): boolean {
   return text.trim().toLowerCase().startsWith("/help");

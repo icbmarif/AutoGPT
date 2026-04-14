@@ -27,6 +27,32 @@ import {
 
 const DISCORD_API = "https://discord.com/api/v10";
 
+/**
+ * Fetch helper that never throws but surfaces non-2xx Discord responses in
+ * logs so 429s, invalid tokens, expired interactions, etc. are visible
+ * instead of silently swallowed.
+ */
+async function discordFetch(
+  url: string,
+  init: RequestInit,
+  label: string,
+): Promise<void> {
+  try {
+    const res = await fetch(url, init);
+    if (res.ok) return;
+    const body = await res.text().catch(() => "<unreadable>");
+    console.error(
+      `[bot] Discord ${label} ${init.method ?? "GET"} ${url} failed: ` +
+        `${res.status} ${res.statusText} — ${body.slice(0, 500)}`,
+    );
+  } catch (err) {
+    console.error(
+      `[bot] Discord ${label} ${init.method ?? "GET"} ${url} threw:`,
+      err,
+    );
+  }
+}
+
 export interface InteractionContext {
   /** Raw Discord interaction payload (escape hatch). */
   readonly raw: DiscordInteraction;
@@ -144,9 +170,32 @@ export async function tryDispatchInteraction(
   }
 
   const interaction = event.data;
-  void dispatch(interaction, registry, api).catch((err) => {
-    console.error("[bot] Interaction dispatch error:", err);
-  });
+  // Fire-and-forget so the forwarder gets a 200 immediately. If dispatch
+  // throws we can't let it vanish — try to post a best-effort error
+  // response to Discord so the invoker sees something instead of a silent
+  // "application did not respond" or partial UI state.
+  void (async () => {
+    try {
+      await dispatch(interaction, registry, api);
+    } catch (err) {
+      console.error("[bot] Interaction dispatch error:", err);
+      await discordFetch(
+        `${DISCORD_API}/interactions/${interaction.id}/${interaction.token}/callback`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: ResponseType.ChannelMessageWithSource,
+            data: {
+              content: "Something went wrong handling that interaction. Please try again.",
+              flags: MessageFlag.Ephemeral,
+            },
+          }),
+        },
+        "dispatch-error-fallback",
+      );
+    }
+  })();
   return new Response(JSON.stringify({ ok: true }), { status: 200 });
 }
 
@@ -232,63 +281,83 @@ function buildContext(
     api,
 
     async respond(content, opts = {}) {
-      await fetch(callbackUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: ResponseType.ChannelMessageWithSource,
-          data: {
-            content,
-            flags: opts.ephemeral ? MessageFlag.Ephemeral : 0,
-            components: opts.components,
-          },
-        }),
-      });
+      await discordFetch(
+        callbackUrl,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: ResponseType.ChannelMessageWithSource,
+            data: {
+              content,
+              flags: opts.ephemeral ? MessageFlag.Ephemeral : 0,
+              components: opts.components,
+            },
+          }),
+        },
+        "respond",
+      );
     },
 
     async defer(opts = {}) {
-      await fetch(callbackUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: ResponseType.DeferredChannelMessageWithSource,
-          data: { flags: opts.ephemeral ? MessageFlag.Ephemeral : 0 },
-        }),
-      });
+      await discordFetch(
+        callbackUrl,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: ResponseType.DeferredChannelMessageWithSource,
+            data: { flags: opts.ephemeral ? MessageFlag.Ephemeral : 0 },
+          }),
+        },
+        "defer",
+      );
     },
 
     async edit(content, opts = {}) {
-      await fetch(`${webhookUrl}/messages/@original`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          content,
-          components: opts.components,
-        }),
-      });
+      await discordFetch(
+        `${webhookUrl}/messages/@original`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content,
+            components: opts.components,
+          }),
+        },
+        "edit",
+      );
     },
 
     async update(content, opts = {}) {
-      await fetch(callbackUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: ResponseType.UpdateMessage,
-          data: { content, components: opts.components },
-        }),
-      });
+      await discordFetch(
+        callbackUrl,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: ResponseType.UpdateMessage,
+            data: { content, components: opts.components },
+          }),
+        },
+        "update",
+      );
     },
 
     async followup(content, opts = {}) {
-      await fetch(webhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          content,
-          flags: opts.ephemeral ? MessageFlag.Ephemeral : 0,
-          components: opts.components,
-        }),
-      });
+      await discordFetch(
+        webhookUrl,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content,
+            flags: opts.ephemeral ? MessageFlag.Ephemeral : 0,
+            components: opts.components,
+          }),
+        },
+        "followup",
+      );
     },
   };
 }
