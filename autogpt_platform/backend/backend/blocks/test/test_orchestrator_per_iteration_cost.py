@@ -7,7 +7,8 @@ the block completes.
 """
 
 import threading
-from unittest.mock import AsyncMock, MagicMock
+from collections import defaultdict
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -669,9 +670,6 @@ async def _run_tool_exec_with_stats(
     Used to prove the dry_run and error guards around charge_node_usage
     behave as documented, and that InsufficientBalanceError propagates.
     """
-    from collections import defaultdict
-    from unittest.mock import AsyncMock, MagicMock, patch
-
     block = OrchestratorBlock()
 
     # Mocked async DB client used inside orchestrator.
@@ -806,6 +804,82 @@ async def test_tool_execution_insufficient_balance_propagates():
         charge_node_usage_mock=raising_charge,
     )
     assert isinstance(raised, InsufficientBalanceError)
+
+
+@pytest.mark.asyncio
+async def test_tool_execution_on_node_execution_returns_none_sets_is_error():
+    """on_node_execution returning None (swallowed by @async_error_logged) must
+    result in a tool response with _is_error=True so the LLM loop knows the
+    tool failed and does not treat a silent error as a successful execution.
+    """
+    block = OrchestratorBlock()
+
+    mock_db_client = AsyncMock()
+    mock_target_node = MagicMock()
+    mock_target_node.block_id = "test-block-id"
+    mock_target_node.input_default = {}
+    mock_db_client.get_node.return_value = mock_target_node
+    mock_node_exec_result = MagicMock()
+    mock_node_exec_result.node_exec_id = "test-tool-exec-id"
+    mock_db_client.upsert_execution_input.return_value = (
+        mock_node_exec_result,
+        {"query": "t"},
+    )
+
+    mock_processor = AsyncMock()
+    mock_processor.running_node_execution = defaultdict(MagicMock)
+    mock_processor.execution_stats = MagicMock()
+    mock_processor.execution_stats_lock = threading.Lock()
+    # on_node_execution returns None — simulates @async_error_logged(swallow=True)
+    # swallowing an internal error
+    mock_processor.on_node_execution = AsyncMock(return_value=None)
+
+    tool_call = MagicMock()
+    tool_call.id = "call-none"
+    tool_call.name = "search_keywords"
+    tool_call.arguments = '{"query":"t"}'
+    tool_def = {
+        "type": "function",
+        "function": {
+            "name": "search_keywords",
+            "_sink_node_id": "test-sink-node-id",
+            "_field_mapping": {},
+            "parameters": {
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        },
+    }
+    tool_info = OrchestratorBlock._build_tool_info_from_args(
+        tool_call_id="call-none",
+        tool_name="search_keywords",
+        tool_args={"query": "t"},
+        tool_def=tool_def,
+    )
+
+    exec_params = ExecutionParams(
+        user_id="u",
+        graph_id="g",
+        node_id="n",
+        graph_version=1,
+        graph_exec_id="ge",
+        node_exec_id="ne",
+        execution_context=ExecutionContext(
+            human_in_the_loop_safe_mode=False, dry_run=False
+        ),
+    )
+
+    with patch(
+        "backend.blocks.orchestrator.get_database_manager_async_client",
+        return_value=mock_db_client,
+    ):
+        resp = await block._execute_single_tool_with_manager(
+            tool_info, exec_params, mock_processor, responses_api=False
+        )
+
+    assert resp.get("_is_error") is True
+    # charge_node_usage must NOT be called for a failed tool execution
+    mock_processor.charge_node_usage.assert_not_called()
 
 
 # ── on_node_execution FAILED + InsufficientBalanceError notification ──
