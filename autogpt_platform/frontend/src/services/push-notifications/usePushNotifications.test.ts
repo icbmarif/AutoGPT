@@ -23,18 +23,17 @@ const mockRegisterServiceWorker = vi.fn();
 const mockSubscribeToPush = vi.fn();
 
 vi.mock("./registration", () => ({
-  isPushSupported: (...args: unknown[]) => mockIsPushSupported(...args),
-  registerServiceWorker: (...args: unknown[]) =>
-    mockRegisterServiceWorker(...args),
-  subscribeToPush: (...args: unknown[]) => mockSubscribeToPush(...args),
+  isPushSupported: () => mockIsPushSupported(),
+  registerServiceWorker: () => mockRegisterServiceWorker(),
+  subscribeToPush: (...args: [unknown, unknown]) => mockSubscribeToPush(...args),
 }));
 
 const mockFetchVapidPublicKey = vi.fn();
 const mockSendSubscriptionToServer = vi.fn();
 
 vi.mock("./api", () => ({
-  fetchVapidPublicKey: (...args: unknown[]) => mockFetchVapidPublicKey(...args),
-  sendSubscriptionToServer: (...args: unknown[]) =>
+  fetchVapidPublicKey: () => mockFetchVapidPublicKey(),
+  sendSubscriptionToServer: (...args: [unknown, unknown]) =>
     mockSendSubscriptionToServer(...args),
 }));
 
