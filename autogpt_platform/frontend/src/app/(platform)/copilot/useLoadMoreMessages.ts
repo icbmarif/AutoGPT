@@ -188,5 +188,15 @@ export function useLoadMoreMessages({
     }
   }
 
-  return { pagedMessages, hasMore, isLoadingMore, loadMore };
+  function resetPaged() {
+    setPagedRawMessages([]);
+    setOldestSequence(initialOldestSequence);
+    setNewestSequence(initialNewestSequence);
+    setHasMore(initialHasMore);
+    isLoadingMoreRef.current = false;
+    consecutiveErrorsRef.current = 0;
+    epochRef.current += 1;
+  }
+
+  return { pagedMessages, hasMore, isLoadingMore, loadMore, resetPaged };
 }

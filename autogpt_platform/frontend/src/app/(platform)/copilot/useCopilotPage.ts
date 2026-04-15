@@ -86,7 +86,7 @@ export function useCopilotPage() {
     copilotModel: isModeToggleEnabled ? copilotLlmModel : undefined,
   });
 
-  const { pagedMessages, hasMore, isLoadingMore, loadMore } =
+  const { pagedMessages, hasMore, isLoadingMore, loadMore, resetPaged } =
     useLoadMoreMessages({
       sessionId,
       initialOldestSequence: oldestSequence,
@@ -261,6 +261,15 @@ export function useCopilotPage() {
     isUserStoppingRef.current = false;
 
     if (sessionId) {
+      // When continuing a completed session that had forward-paginated history
+      // loaded, the paged messages would appear in wrong position relative to
+      // the new streaming turn (pagedMessages are newer pages, so they'd end
+      // up after the streaming turn). Reset paged state so ordering is correct
+      // during streaming; the user can reload history afterward if needed.
+      if (forwardPaginated && pagedMessages.length > 0) {
+        resetPaged();
+      }
+
       if (files && files.length > 0) {
         setIsUploadingFiles(true);
         try {
