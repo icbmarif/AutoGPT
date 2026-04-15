@@ -30,7 +30,11 @@ export function ModelToggleButton({
         readOnly && "cursor-default opacity-70",
       )}
       aria-label={
-        isAdvanced ? "Switch to Standard model" : "Switch to Advanced model"
+        readOnly
+          ? `${isAdvanced ? "Advanced" : "Standard"} model active for this session`
+          : isAdvanced
+            ? "Switch to Standard model"
+            : "Switch to Advanced model"
       }
       title={
         readOnly

@@ -26,7 +26,11 @@ export function ModeToggleButton({ mode, onToggle, readOnly = false }: Props) {
         readOnly && "cursor-default opacity-70",
       )}
       aria-label={
-        isExtended ? "Switch to Fast mode" : "Switch to Extended Thinking mode"
+        readOnly
+          ? `${isExtended ? "Extended Thinking" : "Fast"} mode active for this session`
+          : isExtended
+            ? "Switch to Fast mode"
+            : "Switch to Extended Thinking mode"
       }
       title={
         readOnly
