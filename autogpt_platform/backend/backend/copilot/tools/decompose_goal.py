@@ -191,7 +191,15 @@ async def _schedule_auto_approve(
     baseline_index = len(session.messages)
     task = asyncio.create_task(_run_auto_approve(session_id, user_id, baseline_index))
     _pending_auto_approvals[session_id] = task
-    task.add_done_callback(lambda t: _pending_auto_approvals.pop(session_id, None))
+    # Only remove from dict if this task is still the current one — a
+    # cancelled old task's callback must not clobber a newly-scheduled one.
+    task.add_done_callback(
+        lambda t: (
+            _pending_auto_approvals.pop(session_id, None)
+            if _pending_auto_approvals.get(session_id) is t
+            else None
+        )
+    )
 
 
 class DecomposeGoalTool(BaseTool):

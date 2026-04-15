@@ -714,7 +714,11 @@ async def append_message_if(
         existing_message_count = await chat_db().get_next_sequence(session_id)
 
         try:
-            await _save_session_to_db(session, existing_message_count)
+            await _save_session_to_db(
+                session,
+                existing_message_count,
+                skip_existence_check=True,
+            )
         except Exception as e:
             logger.error(
                 f"append_message_if: failed to persist message to "
