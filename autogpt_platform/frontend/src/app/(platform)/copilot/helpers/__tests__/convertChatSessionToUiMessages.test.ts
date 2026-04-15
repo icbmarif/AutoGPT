@@ -26,10 +26,20 @@ describe("convertChatSessionMessagesToUiMessages", () => {
     expect(result.messages[0].role).toBe("user");
   });
 
-  it("still drops non-user messages with empty content", () => {
+  it("still drops non-user messages with null content", () => {
     const result = convertChatSessionMessagesToUiMessages(
       SESSION_ID,
       [{ role: "assistant", content: null, sequence: 0 }],
+      { isComplete: true },
+    );
+
+    expect(result.messages).toHaveLength(0);
+  });
+
+  it("still drops non-user messages with empty string content", () => {
+    const result = convertChatSessionMessagesToUiMessages(
+      SESSION_ID,
+      [{ role: "assistant", content: "", sequence: 0 }],
       { isComplete: true },
     );
 
