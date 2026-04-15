@@ -9,6 +9,8 @@ from prisma.enums import OnboardingStep
 from prisma.models import UserOnboarding
 from prisma.types import UserOnboardingCreateInput, UserOnboardingUpdateInput
 
+from backend.api.features.store.model import StoreAgentDetails
+from backend.api.model import OnboardingNotificationPayload
 from backend.data import execution as execution_db
 from backend.data.credit import get_user_credit_model
 from backend.data.notification_bus import (
@@ -16,8 +18,6 @@ from backend.data.notification_bus import (
     NotificationEvent,
 )
 from backend.data.user import get_user_by_id
-from backend.server.model import OnboardingNotificationPayload
-from backend.server.v2.store.model import StoreAgentDetails
 from backend.util.cache import cached
 from backend.util.json import SafeJson
 from backend.util.timezone_utils import get_user_timezone_or_utc
@@ -41,6 +41,7 @@ FrontendOnboardingStep = Literal[
     OnboardingStep.AGENT_NEW_RUN,
     OnboardingStep.AGENT_INPUT,
     OnboardingStep.CONGRATS,
+    OnboardingStep.VISIT_COPILOT,
     OnboardingStep.MARKETPLACE_VISIT,
     OnboardingStep.BUILDER_OPEN,
 ]
@@ -122,6 +123,9 @@ async def update_user_onboarding(user_id: str, data: UserOnboardingUpdate):
 async def _reward_user(user_id: str, onboarding: UserOnboarding, step: OnboardingStep):
     reward = 0
     match step:
+        # Welcome bonus for visiting copilot ($5 = 500 credits)
+        case OnboardingStep.VISIT_COPILOT:
+            reward = 500
         # Reward user when they clicked New Run during onboarding
         # This is because they need credits before scheduling a run (next step)
         # This is seen as a reward for the GET_RESULTS step in the wallet
@@ -240,7 +244,10 @@ def _clean_and_split(text: str) -> list[str]:
 
 
 def _calculate_points(
-    agent, categories: list[str], custom: list[str], integrations: list[str]
+    agent: prisma.models.StoreAgent,
+    categories: list[str],
+    custom: list[str],
+    integrations: list[str],
 ) -> int:
     """
     Calculates the total points for an agent based on the specified criteria.
@@ -334,7 +341,7 @@ async def _get_user_timezone(user_id: str) -> str:
     return get_user_timezone_or_utc(user.timezone if user else None)
 
 
-async def increment_runs(user_id: str):
+async def increment_onboarding_runs(user_id: str):
     """
     Increment a user's run counters and trigger any onboarding milestones.
     """
@@ -393,7 +400,7 @@ async def get_recommended_agents(user_id: str) -> list[StoreAgentDetails]:
     storeAgents = await prisma.models.StoreAgent.prisma().find_many(
         where={
             "is_available": True,
-            "useForOnboarding": True,
+            "use_for_onboarding": True,
         },
         order=[
             {"featured": "desc"},
@@ -403,7 +410,7 @@ async def get_recommended_agents(user_id: str) -> list[StoreAgentDetails]:
         take=100,
     )
 
-    # If not enough agents found, relax the useForOnboarding filter
+    # If not enough agents found, relax the use_for_onboarding filter
     if len(storeAgents) < 2:
         storeAgents = await prisma.models.StoreAgent.prisma().find_many(
             where=prisma.types.StoreAgentWhereInput(**where_clause),
@@ -416,7 +423,7 @@ async def get_recommended_agents(user_id: str) -> list[StoreAgentDetails]:
         )
 
     # Calculate points for the first X agents and choose the top 2
-    agent_points = []
+    agent_points: list[tuple[prisma.models.StoreAgent, int]] = []
     for agent in storeAgents[:POINTS_AGENT_COUNT]:
         points = _calculate_points(
             agent, categories, custom, user_onboarding.integrations
@@ -426,26 +433,29 @@ async def get_recommended_agents(user_id: str) -> list[StoreAgentDetails]:
     agent_points.sort(key=lambda x: x[1], reverse=True)
     recommended_agents = [agent for agent, _ in agent_points[:2]]
 
-    return [
-        StoreAgentDetails(
-            store_listing_version_id=agent.storeListingVersionId,
-            slug=agent.slug,
-            agent_name=agent.agent_name,
-            agent_video=agent.agent_video or "",
-            agent_output_demo=agent.agent_output_demo or "",
-            agent_image=agent.agent_image,
-            creator=agent.creator_username,
-            creator_avatar=agent.creator_avatar,
-            sub_heading=agent.sub_heading,
-            description=agent.description,
-            categories=agent.categories,
-            runs=agent.runs,
-            rating=agent.rating,
-            versions=agent.versions,
-            last_updated=agent.updated_at,
-        )
-        for agent in recommended_agents
+    return [StoreAgentDetails.from_db(agent) for agent in recommended_agents]
+
+
+def format_onboarding_for_extraction(
+    user_name: str,
+    user_role: str,
+    pain_points: list[str],
+) -> str:
+    """Format onboarding wizard answers as Q&A text for LLM extraction."""
+
+    def normalize(value: str) -> str:
+        return " ".join(value.strip().split())
+
+    name = normalize(user_name)
+    role = normalize(user_role)
+    points = [normalize(p) for p in pain_points if normalize(p)]
+
+    lines = [
+        f"Q: What is your name?\nA: {name}",
+        f"Q: What best describes your role?\nA: {role}",
+        f"Q: What tasks are eating your time?\nA: {', '.join(points)}",
     ]
+    return "\n\n".join(lines)
 
 
 @cached(maxsize=1, ttl_seconds=300)  # Cache for 5 minutes since this rarely changes
