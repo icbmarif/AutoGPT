@@ -140,27 +140,25 @@ class FindBlockTool(BaseTool):
                         or block.id in COPILOT_EXCLUDED_BLOCK_IDS
                     )
                     if is_excluded:
-                        # MCP_TOOL is always excluded — use run_mcp_tool instead.
-                        if block.block_type == BlockType.MCP_TOOL:
-                            return NoResultsResponse(
-                                message=(
-                                    f"Block '{block.name}' (ID: {block.id}) is not "
-                                    "runnable through find_block/run_block. Use "
-                                    "run_mcp_tool instead."
-                                ),
-                                suggestions=[
-                                    "Use run_mcp_tool to discover and run this MCP tool",
-                                    "Search for an alternative block by name",
-                                ],
-                                session_id=session_id,
-                            )
-                        # Other graph-only blocks are allowed when building an agent.
+                        # Graph-only blocks (INPUT, OUTPUT, MCP_TOOL, AGENT, etc.) are
+                        # exposed when building an agent graph so the LLM can inspect
+                        # their schemas and wire them as nodes.  In CoPilot direct use
+                        # they are not executable — guide the LLM to the right tool.
                         if not for_agent_generation:
-                            return NoResultsResponse(
-                                message=(
+                            if block.block_type == BlockType.MCP_TOOL:
+                                message = (
+                                    f"Block '{block.name}' (ID: {block.id}) cannot be "
+                                    "run directly in CoPilot. Use run_mcp_tool for "
+                                    "interactive MCP execution, or call find_block with "
+                                    "for_agent_generation=true to embed it in an agent graph."
+                                )
+                            else:
+                                message = (
                                     f"Block '{block.name}' (ID: {block.id}) is not available "
                                     "in CoPilot. It can only be used within agent graphs."
-                                ),
+                                )
+                            return NoResultsResponse(
+                                message=message,
                                 suggestions=[
                                     "Search for an alternative block by name",
                                     "Use this block in an agent graph instead",
@@ -237,11 +235,8 @@ class FindBlockTool(BaseTool):
                 if not block or block.disabled:
                     continue
 
-                # MCP_TOOL is always excluded — use run_mcp_tool instead.
-                if block.block_type == BlockType.MCP_TOOL:
-                    continue
-
-                # Other graph-only blocks are skipped unless building an agent graph.
+                # Graph-only blocks (INPUT, OUTPUT, MCP_TOOL, AGENT, etc.) are
+                # skipped in CoPilot direct use but surfaced for agent graph building.
                 if not for_agent_generation and (
                     block.block_type in COPILOT_EXCLUDED_BLOCK_TYPES
                     or block.id in COPILOT_EXCLUDED_BLOCK_IDS

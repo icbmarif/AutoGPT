@@ -39,8 +39,8 @@ Steps:
    and full input/output schemas. The `for_agent_generation=true` flag is
    required to surface graph-only blocks such as AgentInputBlock,
    AgentDropdownInputBlock, AgentOutputBlock, OrchestratorBlock,
-   and WebhookBlock. (MCPToolBlock is never returned by `find_block` —
-   use `run_mcp_tool` directly instead.)
+   and WebhookBlock and MCPToolBlock. (When running MCP tools interactively
+   in CoPilot outside agent generation, use `run_mcp_tool` instead.)
 3. **Find library agents**: Call `find_library_agent` to discover reusable
    agents that can be composed as sub-agents via `AgentExecutorBlock`.
 4. **Generate/modify JSON**: Build or modify the agent JSON using block schemas:
