@@ -142,6 +142,7 @@ export function LoadMoreSentinel({
   onLoadMore,
   rootMargin = "200px 0px 0px 0px",
   adjustScroll = true,
+  forwardPaginated = false,
 }: {
   hasMore: boolean;
   isLoading: boolean;
@@ -155,6 +156,9 @@ export function LoadMoreSentinel({
    *  True for backward pagination (prepend above); false for forward
    *  pagination (append below) where no adjustment is needed. */
   adjustScroll?: boolean;
+  /** When true the button reads "Load newer messages" (forward pagination).
+   *  When false (default) it reads "Load older messages". */
+  forwardPaginated?: boolean;
 }) {
   const sentinelRef = useRef<HTMLDivElement>(null);
   const onLoadMoreRef = useRef(onLoadMore);
@@ -251,7 +255,7 @@ export function LoadMoreSentinel({
             size="small"
             onClick={() => captureAndLoad(false)}
           >
-            Load older messages
+            {forwardPaginated ? "Load newer messages" : "Load older messages"}
           </Button>
         )
       )}
@@ -514,6 +518,7 @@ export function ChatMessagesContainer({
             onLoadMore={onLoadMore}
             rootMargin="0px 0px 200px 0px"
             adjustScroll={false}
+            forwardPaginated
           />
         )}
       </ConversationContent>
