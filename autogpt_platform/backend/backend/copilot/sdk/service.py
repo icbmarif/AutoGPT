@@ -939,8 +939,18 @@ def _read_cli_session_from_disk(
         raw_text = raw_bytes.decode("utf-8")
         stripped_text = strip_for_upload(raw_text)
         stripped_bytes = stripped_text.encode("utf-8")
-        if len(stripped_bytes) < len(raw_bytes):
-            # Write back locally so same-pod turns also benefit.
+    except UnicodeDecodeError:
+        logger.warning("%s CLI session is not valid UTF-8, uploading raw", log_prefix)
+        return raw_bytes
+    except Exception as e:
+        logger.warning(
+            "%s Failed to strip CLI session, uploading raw: %s", log_prefix, e
+        )
+        return raw_bytes
+
+    if len(stripped_bytes) < len(raw_bytes):
+        # Write back locally so same-pod turns also benefit.
+        try:
             Path(real_path).write_bytes(stripped_bytes)
             logger.info(
                 "%s Stripped CLI session: %dB → %dB",
@@ -948,12 +958,15 @@ def _read_cli_session_from_disk(
                 len(raw_bytes),
                 len(stripped_bytes),
             )
-        return stripped_bytes
-    except Exception as e:
-        logger.warning(
-            "%s Failed to strip CLI session, uploading raw: %s", log_prefix, e
-        )
-        return raw_bytes
+        except OSError as e:
+            # write_bytes failed — stripped content is still valid for GCS upload even
+            # though the local write-back failed (same-pod optimization silently skipped).
+            logger.warning(
+                "%s Failed to write back stripped CLI session: %s",
+                log_prefix,
+                e.strerror or str(e),
+            )
+    return stripped_bytes
 
 
 def _process_cli_restore(

@@ -55,9 +55,8 @@ TranscriptMode = Literal["sdk", "baseline"]
 class TranscriptDownload:
     content: bytes
     message_count: int = 0
-    mode: TranscriptMode = (
-        "sdk"  # "sdk" = Claude CLI native, "baseline" = TranscriptBuilder
-    )
+    # "sdk" = Claude CLI native, "baseline" = TranscriptBuilder
+    mode: TranscriptMode = "sdk"
 
 
 # Storage prefix for the CLI's native session JSONL files (for cross-pod --resume).
