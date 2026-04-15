@@ -21,6 +21,7 @@ on:
 
 permissions:
   pull-requests: write
+  issues: write
   contents: read
   statuses: read
   checks: read
@@ -30,9 +31,9 @@ env:
   LABEL_PENDING: 'cla: pending'
   LABEL_SIGNED: 'cla: signed'
   # Timing configuration (all independently configurable)
-  REMINDER_DAYS: 3        # Days before first reminder
-  CLOSE_WARNING_DAYS: 7   # Days before "closing soon" warning
-  CLOSE_DAYS: 10          # Days before auto-close
+  REMINDER_DAYS: 7        # Days before first reminder
+  CLOSE_WARNING_DAYS: 23  # Days before "closing soon" warning
+  CLOSE_DAYS: 30          # Days before auto-close
 
 jobs:
   sync-labels:
@@ -67,6 +68,8 @@ jobs:
                     description: label.description
                   });
                   console.log(`Created label: ${label.name}`);
+                } else {
+                  throw e;
                 }
               }
             }
@@ -172,14 +175,17 @@ jobs:
               const sha = context.payload.sha;
               console.log(`Status event for SHA: ${sha}, context: ${context.payload.context}`);
               
-              // Search for open PRs with this head SHA
-              const { data: prs } = await github.rest.pulls.list({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                state: 'open',
-                per_page: 100
-              });
-              prsToCheck = prs.filter(pr => pr.head.sha === sha).map(pr => pr.number);
+              // Search for open PRs with this head SHA (paginated)
+              const allPRs = await github.paginate(
+                github.rest.pulls.list,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  state: 'open',
+                  per_page: 100
+                }
+              );
+              prsToCheck = allPRs.filter(pr => pr.head.sha === sha).map(pr => pr.number);
               
               if (prsToCheck.length === 0) {
                 console.log('No open PRs found with this SHA');
@@ -229,22 +235,30 @@ jobs:
                   continue;
                 }
                 
-                // Skip if PR doesn't touch platform code (CLA automation only for autogpt_platform/)
-                const PLATFORM_PATH = 'autogpt_platform/';
-                const { data: files } = await github.rest.pulls.listFiles({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  pull_number: prNumber,
-                  per_page: 100
-                });
-                const touchesPlatform = files.some(f => f.filename.startsWith(PLATFORM_PATH));
-                if (!touchesPlatform) {
-                  console.log(`PR #${prNumber}: Skipping - doesn't touch ${PLATFORM_PATH}`);
-                  continue;
+                // Skip if PR already has cla: signed label (optimization for scheduled sweeps)
+                const currentLabels = pr.labels.map(l => l.name);
+                const knownPlatformPR = currentLabels.includes(LABEL_SIGNED) || currentLabels.includes(LABEL_PENDING);
+                
+                // Skip listFiles if we've already labelled this PR (a previous run verified it touches platform code)
+                if (!knownPlatformPR) {
+                  const PLATFORM_PATH = 'autogpt_platform/';
+                  const prFiles = await github.paginate(
+                    github.rest.pulls.listFiles,
+                    {
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      pull_number: prNumber,
+                      per_page: 100
+                    }
+                  );
+                  const touchesPlatform = prFiles.some(f => f.filename.startsWith(PLATFORM_PATH));
+                  if (!touchesPlatform) {
+                    console.log(`PR #${prNumber}: Skipping - doesn't touch ${PLATFORM_PATH}`);
+                    continue;
+                  }
                 }
                 
                 const claStatus = await getClaStatus(pr.head.sha);
-                const currentLabels = pr.labels.map(l => l.name);
                 const hasPending = currentLabels.includes(LABEL_PENDING);
                 const hasSigned = currentLabels.includes(LABEL_SIGNED);
                 const prAgeDays = daysSince(pr.created_at);
@@ -390,16 +404,18 @@ jobs:
             
             We appreciate your interest in AutoGPT and hope to see you back! 🚀`
                         });
+                        
+                        await github.rest.pulls.update({
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          pull_number: prNumber,
+                          state: 'closed'
+                        });
+                        
+                        console.log(`Closed PR #${prNumber} due to unsigned CLA`);
+                      } else {
+                        console.log(`PR #${prNumber}: Already auto-closed previously, skipping (maintainer may have reopened)`);
                       }
-                      
-                      await github.rest.pulls.update({
-                        owner: context.repo.owner,
-                        repo: context.repo.repo,
-                        pull_number: prNumber,
-                        state: 'closed'
-                      });
-                      
-                      console.log(`Closed PR #${prNumber} due to unsigned CLA`);
                     }
                   }
                 }
