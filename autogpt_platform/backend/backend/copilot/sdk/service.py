@@ -998,6 +998,15 @@ async def _build_query_message(
     """
     msg_count = len(session.messages)
 
+    logger.info(
+        "[SDK] [%s] Context path: use_resume=%s, transcript_msg_count=%d,"
+        " db_msg_count=%d",
+        session_id[:8],
+        use_resume,
+        transcript_msg_count,
+        msg_count,
+    )
+
     if use_resume and transcript_msg_count > 0:
         if transcript_msg_count < msg_count - 1:
             gap = session.messages[transcript_msg_count:-1]
@@ -1006,28 +1015,49 @@ async def _build_query_message(
             if gap_context:
                 logger.info(
                     "[SDK] Transcript stale: covers %d of %d messages, "
-                    "gap=%d (compressed=%s)",
+                    "gap=%d (compressed=%s), gap_context_bytes=%d",
                     transcript_msg_count,
                     msg_count,
                     len(gap),
                     was_compressed,
+                    len(gap_context),
                 )
                 return (
                     f"{gap_context}\n\nNow, the user says:\n{current_message}",
                     was_compressed,
                 )
+        logger.info(
+            "[SDK] [%s] --resume covers full context (%d messages)",
+            session_id[:8],
+            transcript_msg_count,
+        )
     elif not use_resume and msg_count > 1:
         logger.warning(
-            f"[SDK] Using compression fallback for session "
-            f"{session_id} ({msg_count} messages) — no transcript for --resume"
+            "[SDK] [%s] No --resume for %d-message session — using"
+            " compression fallback (pod affinity issue or first turn after"
+            " restore failure)",
+            session_id[:8],
+            msg_count,
         )
         compressed, was_compressed = await _compress_messages(session.messages[:-1])
         history_context = _format_conversation_context(compressed)
         if history_context:
+            logger.info(
+                "[SDK] [%s] Fallback context built: compressed=%s," " context_bytes=%d",
+                session_id[:8],
+                was_compressed,
+                len(history_context),
+            )
             return (
                 f"{history_context}\n\nNow, the user says:\n{current_message}",
                 was_compressed,
             )
+        logger.warning(
+            "[SDK] [%s] Fallback context empty after compression"
+            " (%d messages) — sending message without history",
+            session_id[:8],
+            msg_count,
+        )
 
     return current_message, False
 
@@ -3070,6 +3100,13 @@ async def stream_chat_completion_sdk(
         # the shielded inner coroutine continues running to completion so the
         # upload is not lost.  This is intentional and matches the pattern
         # used for upload_transcript immediately above.
+        #
+        # NOTE: upload is attempted regardless of state.use_resume — even when
+        # this turn ran without --resume (restore failed or first T2+ on a new
+        # pod), the T1 session file at the expected path may still be present
+        # and should be re-uploaded so the next turn can resume from it.
+        # upload_cli_session silently skips when the file is absent, so this is
+        # always safe.
         if (
             config.claude_agent_use_resume
             and user_id
@@ -3078,8 +3115,15 @@ async def stream_chat_completion_sdk(
             and state is not None
             and not ended_with_stream_error
             and not skip_transcript_upload
-            and (not has_history or state.use_resume)
         ):
+            logger.info(
+                "%s Attempting CLI session upload"
+                " (use_resume=%s, has_history=%s, skip=%s)",
+                log_prefix,
+                state.use_resume,
+                has_history,
+                skip_transcript_upload,
+            )
             try:
                 await asyncio.shield(
                     upload_cli_session(
