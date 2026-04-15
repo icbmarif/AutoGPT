@@ -982,7 +982,10 @@ class TestRestoreCliSession:
         from .transcript import restore_cli_session
 
         mock_storage = AsyncMock()
-        mock_storage.retrieve.side_effect = FileNotFoundError("not found")
+        mock_storage.retrieve.side_effect = [
+            FileNotFoundError("no session"),
+            FileNotFoundError("no meta"),
+        ]
 
         with patch(
             "backend.copilot.transcript.get_workspace_storage",

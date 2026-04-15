@@ -2503,9 +2503,7 @@ async def stream_chat_completion_sdk(
                         log_prefix,
                     )
                     transcript_covers_prefix = False
-            elif (
-                config.claude_agent_use_resume and user_id and len(session.messages) > 1
-            ):
+            else:
                 # No CLI session in GCS — reconstruct from DB messages as last-resort fallback.
                 prior = session.messages[:-1]
                 reconstructed = _session_messages_to_transcript(prior)

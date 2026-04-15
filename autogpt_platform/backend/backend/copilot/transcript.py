@@ -762,12 +762,12 @@ async def upload_cli_session(
         ),
         return_exceptions=True,
     )
-    if isinstance(session_result, BaseException):
+    if isinstance(session_result, Exception):
         logger.warning(
             "%s Failed to upload CLI session file: %s", log_prefix, session_result
         )
         return
-    if isinstance(meta_result, BaseException):
+    if isinstance(meta_result, Exception):
         logger.warning(
             "%s Failed to upload CLI session meta: %s", log_prefix, meta_result
         )
