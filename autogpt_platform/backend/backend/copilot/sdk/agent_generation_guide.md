@@ -38,7 +38,8 @@ Steps:
    search for relevant blocks. This returns block IDs, names, descriptions,
    and full input/output schemas. The `for_agent_generation=true` flag is
    required to surface graph-only blocks such as AgentInputBlock,
-   AgentOutputBlock, and OrchestratorBlock.
+   AgentDropdownInputBlock, AgentOutputBlock, OrchestratorBlock,
+   WebhookBlock, and MCPToolBlock.
 3. **Find library agents**: Call `find_library_agent` to discover reusable
    agents that can be composed as sub-agents via `AgentExecutorBlock`.
 4. **Generate/modify JSON**: Build or modify the agent JSON using block schemas:
@@ -178,6 +179,12 @@ To compose agents using other agents as sub-agents:
    the library agent IDs used, so the fixer can validate schemas
 
 ### Using MCP Tools (MCPToolBlock)
+
+> **Agent graph vs CoPilot direct execution**: This section covers embedding MCP
+> tools as persistent nodes in an agent graph. When running MCP tools directly in
+> CoPilot (outside agent generation), use `run_mcp_tool` instead — it handles
+> server discovery and authentication interactively. Use `MCPToolBlock` here only
+> when the user wants the MCP call baked into a reusable agent graph.
 
 To use an MCP (Model Context Protocol) tool as a node in the agent:
 1. The user must specify which MCP server URL and tool name they want
