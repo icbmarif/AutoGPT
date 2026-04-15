@@ -21,6 +21,7 @@ from .service import (
     _is_prompt_too_long,
     _is_tool_only_message,
     _iter_sdk_messages,
+    _normalize_model_name,
     _reduce_context,
     _TokenUsage,
 )
