@@ -8,19 +8,20 @@ from uuid import uuid4
 
 import pytest
 
-from backend.copilot.transcript import (
-    _flatten_assistant_content,
-    _flatten_tool_result_content,
-    _messages_to_transcript,
-    _run_compression,
-    _transcript_to_messages,
-)
 from backend.util import json
 from backend.util.prompt import CompressResult
 
 from .conftest import build_test_transcript as _build_transcript
 from .service import _friendly_error_text, _is_prompt_too_long
-from .transcript import compact_transcript, validate_transcript
+from .transcript import (
+    _flatten_assistant_content,
+    _flatten_tool_result_content,
+    _messages_to_transcript,
+    _run_compression,
+    _transcript_to_messages,
+    compact_transcript,
+    validate_transcript,
+)
 
 # ---------------------------------------------------------------------------
 # _flatten_assistant_content
@@ -402,7 +403,7 @@ class TestCompactTranscript:
             },
         )()
         with patch(
-            "backend.copilot.transcript._run_compression",
+            "backend.copilot.sdk.transcript._run_compression",
             new_callable=AsyncMock,
             return_value=mock_result,
         ):
@@ -437,7 +438,7 @@ class TestCompactTranscript:
             },
         )()
         with patch(
-            "backend.copilot.transcript._run_compression",
+            "backend.copilot.sdk.transcript._run_compression",
             new_callable=AsyncMock,
             return_value=mock_result,
         ):
@@ -461,7 +462,7 @@ class TestCompactTranscript:
             ]
         )
         with patch(
-            "backend.copilot.transcript._run_compression",
+            "backend.copilot.sdk.transcript._run_compression",
             new_callable=AsyncMock,
             side_effect=RuntimeError("LLM unavailable"),
         ):
@@ -567,11 +568,11 @@ class TestRunCompressionTimeout:
 
         with (
             patch(
-                "backend.copilot.transcript.get_openai_client",
+                "backend.copilot.sdk.transcript.get_openai_client",
                 return_value="fake-client",
             ),
             patch(
-                "backend.copilot.transcript.compress_context",
+                "backend.copilot.sdk.transcript.compress_context",
                 side_effect=_mock_compress,
             ),
         ):
@@ -601,11 +602,11 @@ class TestRunCompressionTimeout:
 
         with (
             patch(
-                "backend.copilot.transcript.get_openai_client",
+                "backend.copilot.sdk.transcript.get_openai_client",
                 return_value=None,
             ),
             patch(
-                "backend.copilot.transcript.compress_context",
+                "backend.copilot.sdk.transcript.compress_context",
                 new_callable=AsyncMock,
                 return_value=truncation_result,
             ) as mock_compress,

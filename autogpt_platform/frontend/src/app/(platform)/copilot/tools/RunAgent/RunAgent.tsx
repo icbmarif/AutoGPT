@@ -15,7 +15,6 @@ import {
   getAnimationText,
   getRunAgentToolOutput,
   isRunAgentAgentDetailsOutput,
-  isRunAgentAgentOutputResponse,
   isRunAgentErrorOutput,
   isRunAgentExecutionStartedOutput,
   isRunAgentNeedLoginOutput,
@@ -61,17 +60,12 @@ export function RunAgentTool({ part }: Props) {
   const needLoginOutput =
     isOutputAvailable && isRunAgentNeedLoginOutput(output) ? output : null;
 
-  const agentOutputResponse =
-    isOutputAvailable && isRunAgentAgentOutputResponse(output) ? output : null;
-
   const hasExpandableContent =
     isOutputAvailable &&
     !setupRequirementsOutput &&
     !agentDetailsOutput &&
     !needLoginOutput &&
-    (isRunAgentExecutionStartedOutput(output) ||
-      isRunAgentAgentOutputResponse(output) ||
-      isRunAgentErrorOutput(output));
+    (isRunAgentExecutionStartedOutput(output) || isRunAgentErrorOutput(output));
 
   return (
     <div className="py-2">
@@ -127,19 +121,6 @@ export function RunAgentTool({ part }: Props) {
         <ToolAccordion {...getAccordionMeta(output)}>
           {isRunAgentExecutionStartedOutput(output) && (
             <ExecutionStartedCard output={output} />
-          )}
-
-          {agentOutputResponse && (
-            <ExecutionStartedCard
-              output={{
-                message: agentOutputResponse.message,
-                execution_id: agentOutputResponse.execution?.execution_id ?? "",
-                graph_id: agentOutputResponse.agent_id,
-                graph_name: agentOutputResponse.agent_name,
-                library_agent_link:
-                  agentOutputResponse.library_agent_link ?? undefined,
-              }}
-            />
           )}
 
           {isRunAgentErrorOutput(output) && <ErrorCard output={output} />}

@@ -24,7 +24,7 @@ class CreateAgentTool(BaseTool):
     def description(self) -> str:
         return (
             "Create a new agent from JSON (nodes + links). Validates, auto-fixes, and saves. "
-            "If you haven't already, call get_agent_building_guide first."
+            "Before calling, search for existing agents with find_library_agent."
         )
 
     @property

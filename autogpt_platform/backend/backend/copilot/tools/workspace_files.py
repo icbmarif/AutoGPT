@@ -845,7 +845,6 @@ class WriteWorkspaceFileTool(BaseTool):
                 path=path,
                 mime_type=mime_type,
                 overwrite=overwrite,
-                metadata={"origin": "agent-created"},
             )
 
             # Build informative source label and message.

@@ -375,12 +375,7 @@ async def test_bare_ref_toml_returns_parsed_dict():
 
 @pytest.mark.asyncio
 async def test_read_file_handler_local_file():
-    """_read_file_handler rejects files in sdk_cwd (use read_file MCP tool for those).
-
-    read_tool_result is restricted to SDK-internal tool-results/tool-outputs paths
-    via is_sdk_tool_path(). sdk_cwd files should be read via the read_file (e2b_file_tools)
-    handler, not via read_tool_result.
-    """
+    """_read_file_handler reads a local file when it's within sdk_cwd."""
     with tempfile.TemporaryDirectory() as sdk_cwd:
         test_file = os.path.join(sdk_cwd, "read_test.txt")
         lines = [f"L{i}\n" for i in range(1, 6)]
@@ -394,16 +389,16 @@ async def test_read_file_handler_local_file():
             return_value=("user-1", _make_session()),
         ):
             mock_cwd_var.get.return_value = sdk_cwd
-            # No project_dir set — so is_sdk_tool_path returns False for sdk_cwd paths
             mock_proj_var.get.return_value = ""
 
             result = await _read_file_handler(
                 {"file_path": test_file, "offset": 0, "limit": 5}
             )
 
-        # sdk_cwd paths are NOT allowed via read_tool_result (use read_file instead)
-        assert result["isError"]
-        assert "not allowed" in result["content"][0]["text"].lower()
+        assert not result["isError"]
+        text = result["content"][0]["text"]
+        assert "L1" in text
+        assert "L5" in text
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-import { useContext, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { z } from "zod";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -16,19 +16,8 @@ import {
   BlockIOCredentialsSubSchema,
   CredentialsMetaInput,
 } from "@/lib/autogpt-server-api/types";
-import { CredentialsProvidersContext } from "@/providers/agent-credentials/credentials-provider";
 import { getHostFromUrl } from "@/lib/utils/url";
 import { PlusIcon, TrashIcon } from "@phosphor-icons/react";
-import { toast } from "@/components/molecules/Toast/use-toast";
-import {
-  addHeaderPairToList,
-  findExistingHostCredentials,
-  hasExistingHostCredential,
-  headerPairsToRecord,
-  removeHeaderPairFromList,
-  updateHeaderPairInList,
-  type HeaderPair,
-} from "../../helpers";
 
 type Props = {
   schema: BlockIOCredentialsSubSchema;
@@ -46,7 +35,6 @@ export function HostScopedCredentialsModal({
   siblingInputs,
 }: Props) {
   const credentials = useCredentials(schema, siblingInputs);
-  const allProviders = useContext(CredentialsProvidersContext);
 
   // Get current host from siblingInputs or discriminator_values
   const currentUrl = credentials?.discriminatorValue;
@@ -77,9 +65,9 @@ export function HostScopedCredentialsModal({
     },
   });
 
-  const [headerPairs, setHeaderPairs] = useState<HeaderPair[]>([
-    { key: "", value: "" },
-  ]);
+  const [headerPairs, setHeaderPairs] = useState<
+    Array<{ key: string; value: string }>
+  >([{ key: "", value: "" }]);
 
   // Update form values when siblingInputs change
   useEffect(() => {
@@ -101,30 +89,16 @@ export function HostScopedCredentialsModal({
     return null;
   }
 
-  const {
-    provider,
-    providerName,
-    createHostScopedCredentials,
-    deleteCredentials,
-  } = credentials;
-
-  // Use the unfiltered credential list from the provider context for deduplication.
-  // The hook's savedCredentials is pre-filtered by discriminatorValue, which may be
-  // empty when no URL is entered yet — causing deduplication to miss existing creds.
-  const allProviderCredentials =
-    allProviders?.[provider]?.savedCredentials ?? [];
-
-  const hasExistingForHost = hasExistingHostCredential(
-    allProviderCredentials,
-    currentHost || form.getValues("host"),
-  );
+  const { provider, providerName, createHostScopedCredentials } = credentials;
 
   const addHeaderPair = () => {
-    setHeaderPairs((prev) => addHeaderPairToList(prev));
+    setHeaderPairs([...headerPairs, { key: "", value: "" }]);
   };
 
   const removeHeaderPair = (index: number) => {
-    setHeaderPairs((prev) => removeHeaderPairFromList(prev, index));
+    if (headerPairs.length > 1) {
+      setHeaderPairs(headerPairs.filter((_, i) => i !== index));
+    }
   };
 
   const updateHeaderPair = (
@@ -132,55 +106,40 @@ export function HostScopedCredentialsModal({
     field: "key" | "value",
     value: string,
   ) => {
-    setHeaderPairs((prev) => updateHeaderPairInList(prev, index, field, value));
+    const newPairs = [...headerPairs];
+    newPairs[index][field] = value;
+    setHeaderPairs(newPairs);
   };
 
   async function onSubmit(values: z.infer<typeof formSchema>) {
-    const headers = headerPairsToRecord(headerPairs);
-
-    // Delete existing host-scoped credentials for the same host to avoid duplicates.
-    // Uses unfiltered provider credentials (not the hook's pre-filtered list).
-    const host = values.host;
-    const existingForHost = findExistingHostCredentials(
-      allProviderCredentials,
-      host,
+    // Convert header pairs to object, filtering out empty pairs
+    const headers = headerPairs.reduce(
+      (acc, pair) => {
+        if (pair.key.trim() && pair.value.trim()) {
+          acc[pair.key.trim()] = pair.value.trim();
+        }
+        return acc;
+      },
+      {} as Record<string, string>,
     );
 
-    try {
-      for (const existing of existingForHost) {
-        await deleteCredentials(existing.id, true);
-      }
+    const newCredentials = await createHostScopedCredentials({
+      host: values.host,
+      title: currentHost || values.host,
+      headers,
+    });
 
-      const newCredentials = await createHostScopedCredentials({
-        host,
-        title: currentHost || host,
-        headers,
-      });
-
-      onCredentialsCreate({
-        provider,
-        id: newCredentials.id,
-        type: "host_scoped",
-        title: newCredentials.title,
-      });
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Something went wrong";
-      toast({
-        title: "Failed to save credentials",
-        description: message,
-        variant: "destructive",
-      });
-    }
+    onCredentialsCreate({
+      provider,
+      id: newCredentials.id,
+      type: "host_scoped",
+      title: newCredentials.title,
+    });
   }
 
   return (
     <Dialog
-      title={
-        hasExistingForHost
-          ? `Update sensitive headers for ${providerName}`
-          : `Add sensitive headers for ${providerName}`
-      }
+      title={`Add sensitive headers for ${providerName}`}
       controlled={{
         isOpen: open,
         set: (isOpen) => {
@@ -282,9 +241,7 @@ export function HostScopedCredentialsModal({
 
             <div className="pt-8">
               <Button type="submit" className="w-full" size="small">
-                {hasExistingForHost
-                  ? "Update & use these credentials"
-                  : "Save & use these credentials"}
+                Save & use these credentials
               </Button>
             </div>
           </form>

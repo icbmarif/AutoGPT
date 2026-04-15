@@ -49,8 +49,12 @@ class RunBlockTool(BaseTool):
                     "type": "object",
                     "description": "Input values. Use {} first to see schema.",
                 },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Execute in preview mode.",
+                },
             },
-            "required": ["block_id", "input_data"],
+            "required": ["block_id", "input_data", "dry_run"],
         }
 
     @property
@@ -64,7 +68,8 @@ class RunBlockTool(BaseTool):
         *,
         block_id: str = "",
         input_data: dict | None = None,
-        **kwargs,  # dry_run is intentionally not accepted; read from session.dry_run
+        dry_run: bool,
+        **kwargs,
     ) -> ToolResponseBase:
         """Execute a block with the given input data.
 
@@ -73,6 +78,7 @@ class RunBlockTool(BaseTool):
             session: Chat session
             block_id: Block UUID to execute
             input_data: Input values for the block
+            dry_run: If True, simulate execution without side effects
 
         Returns:
             BlockOutputResponse: Block execution outputs
@@ -82,8 +88,9 @@ class RunBlockTool(BaseTool):
         block_id = block_id.strip()
         if input_data is None:
             input_data = {}
-        # Session-level flag drives dry-run mode — not exposed to the LLM.
-        dry_run = session.dry_run
+        # Session-level dry_run forces all tool calls to use dry-run mode.
+        if session.dry_run:
+            dry_run = True
         session_id = session.session_id
 
         if not block_id:

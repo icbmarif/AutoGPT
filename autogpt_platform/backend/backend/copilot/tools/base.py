@@ -186,7 +186,7 @@ class BaseTool:
 
         try:
             result = await self._execute(user_id, session, **kwargs)
-            raw_output = result.model_dump_json(exclude_none=True)
+            raw_output = result.model_dump_json()
 
             if (
                 len(raw_output) > _LARGE_OUTPUT_THRESHOLD

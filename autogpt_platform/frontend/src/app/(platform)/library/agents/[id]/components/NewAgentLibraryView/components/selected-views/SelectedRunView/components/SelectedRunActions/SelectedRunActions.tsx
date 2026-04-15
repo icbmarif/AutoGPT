@@ -2,6 +2,7 @@ import { GraphExecution } from "@/app/api/__generated__/models/graphExecution";
 import { LibraryAgent } from "@/app/api/__generated__/models/libraryAgent";
 import { Button } from "@/components/atoms/Button/Button";
 import { LoadingSpinner } from "@/components/atoms/LoadingSpinner/LoadingSpinner";
+import { Flag, useGetFlag } from "@/services/feature-flags/use-get-flag";
 import {
   ArrowBendLeftUpIcon,
   ArrowBendRightDownIcon,
@@ -46,6 +47,7 @@ export function SelectedRunActions({
     onSelectRun: onSelectRun,
   });
 
+  const shareExecutionResultsEnabled = useGetFlag(Flag.SHARE_EXECUTION_RESULTS);
   const isRunning = run?.status === "RUNNING";
 
   if (!run || !agent) return null;
@@ -102,12 +104,14 @@ export function SelectedRunActions({
           <EyeIcon weight="bold" size={18} className="text-zinc-700" />
         </Button>
       ) : null}
-      <ShareRunButton
-        graphId={agent.graph_id}
-        executionId={run.id}
-        isShared={run.is_shared}
-        shareToken={run.share_token}
-      />
+      {shareExecutionResultsEnabled && (
+        <ShareRunButton
+          graphId={agent.graph_id}
+          executionId={run.id}
+          isShared={run.is_shared}
+          shareToken={run.share_token}
+        />
+      )}
       {canRunManually && (
         <>
           <Button
