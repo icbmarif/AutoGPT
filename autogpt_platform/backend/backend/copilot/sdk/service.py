@@ -1044,17 +1044,13 @@ async def _build_query_message(
     When ``use_resume=True``, the CLI has the full session via ``--resume``;
     only a gap-fill prefix is injected when the transcript is stale.
 
-    When ``use_resume=False``, context is built from DB messages via
-    ``_format_conversation_context``.  Three sub-paths:
-
-    * Transcript covers a prefix AND a gap exists — inject compressed gap
-      (efficient: only new messages since the transcript end).
-    * Transcript covers everything OR no transcript — inject the full prior
-      session compressed to ``target_tokens``.  ``compress_context`` handles
-      size reduction internally via LLM summarize → content truncate →
-      middle-out delete → first/last trim, so no message-count cap is needed.
-    * ``target_tokens`` decreases on each retry to force progressively more
-      aggressive compression when the first attempt exceeds context limits.
+    When ``use_resume=False``, the CLI starts a fresh session with no prior
+    context, so the full prior session is always compressed and injected via
+    ``_format_conversation_context``.  ``compress_context`` handles size
+    reduction internally (LLM summarize → content truncate → middle-out delete
+    → first/last trim).  ``target_tokens`` decreases on each retry to force
+    progressively more aggressive compression when the first attempt exceeds
+    context limits.
 
     Returns:
         Tuple of (query_message, was_compacted).
