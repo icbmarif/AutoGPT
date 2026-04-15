@@ -16,8 +16,8 @@ from backend.api.features.library.exceptions import (
     FolderAlreadyExistsError,
     FolderValidationError,
 )
-from backend.data.db import query_raw_with_schema, transaction
-from backend.data.execution import get_graph_execution
+from backend.data.db import transaction
+from backend.data.execution import get_graph_execution, get_graph_executions_count
 from backend.data.graph import GraphSettings
 from backend.data.includes import (
     AGENT_PRESET_INCLUDE,
@@ -44,21 +44,16 @@ integration_creds_manager = IntegrationCredentialsManager()
 
 
 async def _fetch_execution_counts(user_id: str, graph_ids: list[str]) -> dict[str, int]:
-    """Fetch execution counts per graph for the current user using a single query."""
+    """Fetch execution counts per graph for the current user."""
     if not graph_ids:
         return {}
-    placeholders = ", ".join(f"${i + 2}" for i in range(len(graph_ids)))
-    rows = await query_raw_with_schema(
-        f"""
-        SELECT "agentGraphId", COUNT(*)::int AS cnt
-        FROM {{schema_prefix}}"AgentGraphExecution"
-        WHERE "userId" = $1 AND "agentGraphId" IN ({placeholders})
-        GROUP BY "agentGraphId"
-        """,
-        user_id,
-        *graph_ids,
+    counts = await asyncio.gather(
+        *[
+            get_graph_executions_count(user_id=user_id, graph_id=gid)
+            for gid in graph_ids
+        ]
     )
-    return {row["agentGraphId"]: row["cnt"] for row in rows}
+    return dict(zip(graph_ids, counts))
 
 
 async def list_library_agents(
