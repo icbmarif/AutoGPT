@@ -1,7 +1,6 @@
 """Chat API routes for chat session management and streaming via SSE."""
 
 import asyncio
-import hashlib
 import logging
 import re
 from collections.abc import AsyncGenerator
@@ -16,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.copilot import service as chat_service
 from backend.copilot import stream_registry
+from backend.copilot.message_dedup import acquire_dedup_lock
 from backend.copilot.config import ChatConfig, CopilotMode
 from backend.copilot.db import get_chat_messages_paginated
 from backend.copilot.executor.utils import enqueue_cancel_task, enqueue_copilot_turn
@@ -813,7 +813,7 @@ async def stream_chat_post(
     sanitized_file_ids: list[str] | None = None
     # Capture the original message text BEFORE any mutation (attachment enrichment)
     # so the idempotency hash is stable across retries.
-    _original_message = request.message
+    original_message = request.message
     if request.file_ids and user_id:
         # Filter to valid UUIDs only to prevent DB abuse
         valid_ids = [fid for fid in request.file_ids if _UUID_RE.match(fid)]
@@ -843,31 +843,14 @@ async def stream_chat_post(
                 request.message += files_block
 
     # ── Idempotency guard ────────────────────────────────────────────────────
-    # Prevent duplicate executor tasks from concurrent/retry POSTs (e.g. k8s
-    # rolling-deploy retries, nginx upstream retries, rapid double-clicks).
-    # We set a Redis NX key keyed on session_id + stable message hash. The key
-    # is released only on StreamFinish (turn complete) or on generator error
-    # (allow retry). On client disconnect (GeneratorExit) the key is intentionally
-    # retained because the backend turn is still running — releasing it there
-    # would re-open the duplicate-submit window. The 30 s TTL is the fallback.
-    # We hash the *original* message (before attachment enrichment) plus a
-    # sorted file ID list so the fingerprint is stable across retries.
-    _dedup_key: str | None = None
-    _dedup_redis = None
-    if request.is_user_message and (_original_message or sanitized_file_ids):
-        _sorted_file_ids = ":".join(sorted(sanitized_file_ids or []))
-        _content_hash = hashlib.sha256(
-            f"{session_id}:{_original_message}:{_sorted_file_ids}".encode()
-        ).hexdigest()[:16]
-        _dedup_key = f"chat:msg_dedup:{session_id}:{_content_hash}"
-        _dedup_redis = await get_redis_async()
-        _is_new_msg = await _dedup_redis.set(_dedup_key, "1", ex=30, nx=True)
-        if not _is_new_msg:
-            logger.warning(
-                f"[STREAM] Duplicate user message blocked for session {session_id}, "
-                f"hash={_content_hash} — returning empty SSE",
-                extra={"json_fields": log_meta},
-            )
+    # Blocks duplicate executor tasks from concurrent/retried POSTs.
+    # See backend/copilot/message_dedup.py for the full lifecycle description.
+    dedup_lock = None
+    if request.is_user_message:
+        dedup_lock = await acquire_dedup_lock(
+            session_id, original_message, sanitized_file_ids
+        )
+        if dedup_lock is None and (original_message or sanitized_file_ids):
 
             async def _empty_sse() -> AsyncGenerator[str, None]:
                 yield StreamFinish().to_sse()
@@ -964,11 +947,8 @@ async def stream_chat_post(
 
             if subscriber_queue is None:
                 yield StreamFinish().to_sse()
-                if _dedup_key and _dedup_redis:
-                    try:
-                        await _dedup_redis.delete(_dedup_key)
-                    except Exception:
-                        pass
+                if dedup_lock:
+                    await dedup_lock.release()
                 return
 
             # Read from the subscriber queue and yield to SSE
@@ -1014,11 +994,8 @@ async def stream_chat_post(
                         )
                         # Release dedup key only on true turn completion.
                         # The 30 s TTL is the fallback if this delete fails.
-                        if _dedup_key and _dedup_redis:
-                            try:
-                                await _dedup_redis.delete(_dedup_key)
-                            except Exception:
-                                pass
+                        if dedup_lock:
+                            await dedup_lock.release()
                         break
                 except asyncio.TimeoutError:
                     yield StreamHeartbeat().to_sse()
@@ -1034,7 +1011,7 @@ async def stream_chat_post(
                     }
                 },
             )
-            # Do NOT release the dedup key on client disconnect — the backend
+            # Do NOT release the dedup lock on client disconnect — the backend
             # turn is still running, and releasing here would reopen the window
             # for infra-level retries to create duplicate turns.
             pass  # Client disconnected - background task continues
@@ -1052,12 +1029,9 @@ async def stream_chat_post(
                 code="stream_error",
             ).to_sse()
             yield StreamFinish().to_sse()
-            # Release dedup key — turn failed, allow retry.
-            if _dedup_key and _dedup_redis:
-                try:
-                    await _dedup_redis.delete(_dedup_key)
-                except Exception:
-                    pass
+            # Release dedup lock — turn failed, allow retry.
+            if dedup_lock:
+                await dedup_lock.release()
         finally:
             # Unsubscribe when client disconnects or stream ends
             if subscriber_queue is not None:

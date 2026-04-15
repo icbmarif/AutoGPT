@@ -177,7 +177,7 @@ def _mock_stream_internals(
     mock_redis = AsyncMock()
     mock_redis.set = AsyncMock(return_value=redis_set_returns)
     mocker.patch(
-        "backend.api.features.chat.routes.get_redis_async",
+        "backend.copilot.message_dedup.get_redis_async",
         new_callable=AsyncMock,
         return_value=mock_redis,
     )
@@ -865,7 +865,7 @@ def test_stream_chat_dedup_key_released_after_stream_finish(
     mock_redis = mocker.AsyncMock()
     mock_redis.set = _AsyncMock(return_value=True)
     mocker.patch(
-        "backend.api.features.chat.routes.get_redis_async",
+        "backend.copilot.message_dedup.get_redis_async",
         new_callable=_AsyncMock,
         return_value=mock_redis,
     )
@@ -917,7 +917,7 @@ def test_stream_chat_dedup_key_released_even_when_redis_delete_raises(
     # Make the delete raise so the except-pass branch is exercised.
     mock_redis.delete = _AsyncMock(side_effect=RuntimeError("redis gone"))
     mocker.patch(
-        "backend.api.features.chat.routes.get_redis_async",
+        "backend.copilot.message_dedup.get_redis_async",
         new_callable=_AsyncMock,
         return_value=mock_redis,
     )
