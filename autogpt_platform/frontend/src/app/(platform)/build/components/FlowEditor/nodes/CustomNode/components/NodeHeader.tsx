@@ -28,7 +28,9 @@ export const NodeHeader = ({ data, nodeId }: Props) => {
       ? `${agentName} v${graphVersion}`
       : agentName || undefined;
 
-  const isAgentOrCustomTitle = !!(data.metadata?.customized_name || agentDisplayName);
+  const isAgentOrCustomTitle = !!(
+    data.metadata?.customized_name || agentDisplayName
+  );
   const title =
     (data.metadata?.customized_name as string) ||
     agentDisplayName ||
@@ -87,12 +89,22 @@ export const NodeHeader = ({ data, nodeId }: Props) => {
                         variant="large-semibold"
                         className="line-clamp-1 hover:cursor-text"
                       >
-                        {isAgentOrCustomTitle ? title : beautifyString(title).replace(/ Block$/, "").trim()}
+                        {isAgentOrCustomTitle
+                          ? title
+                          : beautifyString(title)
+                              .replace(/ Block$/, "")
+                              .trim()}
                       </Text>
                     </div>
                   </TooltipTrigger>
                   <TooltipContent>
-                    <p>{isAgentOrCustomTitle ? title : beautifyString(title).replace(/ Block$/, "").trim()}</p>
+                    <p>
+                      {isAgentOrCustomTitle
+                        ? title
+                        : beautifyString(title)
+                            .replace(/ Block$/, "")
+                            .trim()}
+                    </p>
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
