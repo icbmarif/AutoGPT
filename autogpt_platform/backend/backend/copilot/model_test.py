@@ -1,6 +1,7 @@
 from typing import cast
 
 import pytest
+import pytest_mock
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionMessageParam,
@@ -16,7 +17,10 @@ from .model import (
     ChatMessage,
     ChatSession,
     Usage,
+    delete_chat_session,
     get_chat_session,
+    is_message_duplicate,
+    maybe_append_user_message,
     upsert_chat_session,
 )
 
@@ -129,6 +133,56 @@ async def test_chatsession_db_storage(setup_test_user, test_user_id):
                 loaded.tool_calls is not None
             ), f"Tool calls missing for {orig.role} message"
             assert len(orig.tool_calls) == len(loaded.tool_calls)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_delete_chat_session_schedules_browser_cleanup(
+    mocker: pytest_mock.MockerFixture,
+):
+    db = mocker.MagicMock()
+    db.delete_chat_session = mocker.AsyncMock(return_value=True)
+    mocker.patch("backend.copilot.model.chat_db", return_value=db)
+
+    redis = mocker.AsyncMock()
+    redis.delete = mocker.AsyncMock(return_value=1)
+    mocker.patch(
+        "backend.copilot.model.get_redis_async",
+        new_callable=mocker.AsyncMock,
+        return_value=redis,
+    )
+    mock_create_task = mocker.patch("backend.copilot.model.asyncio.create_task")
+
+    deleted = await delete_chat_session("sess-1", "user-1")
+
+    assert deleted is True
+    db.delete_chat_session.assert_awaited_once_with("sess-1", "user-1")
+    redis.delete.assert_awaited_once_with("chat:session:sess-1")
+    mock_create_task.assert_called_once()
+    # close background coroutine to avoid un-awaited coroutine warning in tests
+    mock_create_task.call_args.args[0].close()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_delete_chat_session_does_not_schedule_cleanup_without_user_id(
+    mocker: pytest_mock.MockerFixture,
+):
+    db = mocker.MagicMock()
+    db.delete_chat_session = mocker.AsyncMock(return_value=True)
+    mocker.patch("backend.copilot.model.chat_db", return_value=db)
+
+    redis = mocker.AsyncMock()
+    redis.delete = mocker.AsyncMock(return_value=1)
+    mocker.patch(
+        "backend.copilot.model.get_redis_async",
+        new_callable=mocker.AsyncMock,
+        return_value=redis,
+    )
+    mock_create_task = mocker.patch("backend.copilot.model.asyncio.create_task")
+
+    deleted = await delete_chat_session("sess-1", None)
+
+    assert deleted is True
+    mock_create_task.assert_not_called()
 
 
 # --------------------------------------------------------------------------- #
@@ -424,3 +478,151 @@ async def test_concurrent_saves_collision_detection(setup_test_user, test_user_i
     assert "Streaming message 1" in contents
     assert "Streaming message 2" in contents
     assert "Callback result" in contents
+
+
+# --------------------------------------------------------------------------- #
+#  is_message_duplicate                                                        #
+# --------------------------------------------------------------------------- #
+
+
+def test_duplicate_detected_in_trailing_same_role():
+    """Duplicate user message at the tail is detected."""
+    msgs = [
+        ChatMessage(role="user", content="hello"),
+        ChatMessage(role="assistant", content="hi there"),
+        ChatMessage(role="user", content="yes"),
+    ]
+    assert is_message_duplicate(msgs, "user", "yes") is True
+
+
+def test_duplicate_not_detected_across_turns():
+    """Same text in a previous turn (separated by assistant) is NOT a duplicate."""
+    msgs = [
+        ChatMessage(role="user", content="yes"),
+        ChatMessage(role="assistant", content="ok"),
+    ]
+    assert is_message_duplicate(msgs, "user", "yes") is False
+
+
+def test_no_duplicate_on_empty_messages():
+    """Empty message list never reports a duplicate."""
+    assert is_message_duplicate([], "user", "hello") is False
+
+
+def test_no_duplicate_when_content_differs():
+    """Different content in the trailing same-role block is not a duplicate."""
+    msgs = [
+        ChatMessage(role="assistant", content="response"),
+        ChatMessage(role="user", content="first message"),
+    ]
+    assert is_message_duplicate(msgs, "user", "second message") is False
+
+
+def test_duplicate_with_multiple_trailing_same_role():
+    """Detects duplicate among multiple consecutive same-role messages."""
+    msgs = [
+        ChatMessage(role="assistant", content="response"),
+        ChatMessage(role="user", content="msg1"),
+        ChatMessage(role="user", content="msg2"),
+    ]
+    assert is_message_duplicate(msgs, "user", "msg1") is True
+    assert is_message_duplicate(msgs, "user", "msg2") is True
+    assert is_message_duplicate(msgs, "user", "msg3") is False
+
+
+def test_duplicate_check_for_assistant_role():
+    """Works correctly when checking assistant role too."""
+    msgs = [
+        ChatMessage(role="user", content="hi"),
+        ChatMessage(role="assistant", content="hello"),
+        ChatMessage(role="assistant", content="how can I help?"),
+    ]
+    assert is_message_duplicate(msgs, "assistant", "hello") is True
+    assert is_message_duplicate(msgs, "assistant", "new response") is False
+
+
+def test_no_false_positive_when_content_is_none():
+    """Messages with content=None in the trailing block do not match."""
+    msgs = [
+        ChatMessage(role="user", content=None),
+        ChatMessage(role="user", content="hello"),
+    ]
+    assert is_message_duplicate(msgs, "user", "hello") is True
+    # None-content message should not match any string
+    msgs2 = [
+        ChatMessage(role="user", content=None),
+    ]
+    assert is_message_duplicate(msgs2, "user", "hello") is False
+
+
+def test_all_same_role_messages():
+    """When all messages share the same role, the entire list is scanned."""
+    msgs = [
+        ChatMessage(role="user", content="first"),
+        ChatMessage(role="user", content="second"),
+        ChatMessage(role="user", content="third"),
+    ]
+    assert is_message_duplicate(msgs, "user", "first") is True
+    assert is_message_duplicate(msgs, "user", "new") is False
+
+
+# --------------------------------------------------------------------------- #
+#  maybe_append_user_message                                                   #
+# --------------------------------------------------------------------------- #
+
+
+def test_maybe_append_user_message_appends_new():
+    """A new user message is appended and returns True."""
+    session = ChatSession.new(user_id="u", dry_run=False)
+    session.messages = [
+        ChatMessage(role="assistant", content="hello"),
+    ]
+    result = maybe_append_user_message(session, "new msg", is_user_message=True)
+    assert result is True
+    assert len(session.messages) == 2
+    assert session.messages[-1].role == "user"
+    assert session.messages[-1].content == "new msg"
+
+
+def test_maybe_append_user_message_skips_duplicate():
+    """A duplicate user message is skipped and returns False."""
+    session = ChatSession.new(user_id="u", dry_run=False)
+    session.messages = [
+        ChatMessage(role="assistant", content="hello"),
+        ChatMessage(role="user", content="dup"),
+    ]
+    result = maybe_append_user_message(session, "dup", is_user_message=True)
+    assert result is False
+    assert len(session.messages) == 2
+
+
+def test_maybe_append_user_message_none_message():
+    """None/empty message returns False without appending."""
+    session = ChatSession.new(user_id="u", dry_run=False)
+    assert maybe_append_user_message(session, None, is_user_message=True) is False
+    assert maybe_append_user_message(session, "", is_user_message=True) is False
+    assert len(session.messages) == 0
+
+
+def test_maybe_append_assistant_message():
+    """Works for assistant role when is_user_message=False."""
+    session = ChatSession.new(user_id="u", dry_run=False)
+    session.messages = [
+        ChatMessage(role="user", content="hi"),
+    ]
+    result = maybe_append_user_message(session, "response", is_user_message=False)
+    assert result is True
+    assert session.messages[-1].role == "assistant"
+    assert session.messages[-1].content == "response"
+
+
+def test_maybe_append_assistant_skips_duplicate():
+    """Duplicate assistant message is skipped."""
+    session = ChatSession.new(user_id="u", dry_run=False)
+    session.messages = [
+        ChatMessage(role="user", content="hi"),
+        ChatMessage(role="assistant", content="dup"),
+    ]
+    result = maybe_append_user_message(session, "dup", is_user_message=False)
+    assert result is False
+    assert len(session.messages) == 2
