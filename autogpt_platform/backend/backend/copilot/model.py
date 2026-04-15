@@ -46,6 +46,16 @@ def _get_session_cache_key(session_id: str) -> str:
 # ===================== Chat data models ===================== #
 
 
+class ChatSessionMetadata(BaseModel):
+    """Typed metadata stored in the ``metadata`` JSON column of ChatSession.
+
+    Add new session-level flags here instead of adding DB columns —
+    no migration required for new fields as long as a default is provided.
+    """
+
+    dry_run: bool = False
+
+
 class ChatMessage(BaseModel):
     role: str
     content: str | None = None
@@ -54,6 +64,8 @@ class ChatMessage(BaseModel):
     refusal: str | None = None
     tool_calls: list[dict] | None = None
     function_call: dict | None = None
+    sequence: int | None = None
+    duration_ms: int | None = None
 
     @staticmethod
     def from_db(prisma_message: PrismaChatMessage) -> "ChatMessage":
@@ -66,13 +78,61 @@ class ChatMessage(BaseModel):
             refusal=prisma_message.refusal,
             tool_calls=_parse_json_field(prisma_message.toolCalls),
             function_call=_parse_json_field(prisma_message.functionCall),
+            sequence=prisma_message.sequence,
+            duration_ms=prisma_message.durationMs,
         )
+
+
+def is_message_duplicate(
+    messages: list[ChatMessage],
+    role: str,
+    content: str,
+) -> bool:
+    """Check whether *content* is already present in the current pending turn.
+
+    Only inspects trailing messages that share the given *role* (i.e. the
+    current turn). This ensures legitimately repeated messages across different
+    turns are not suppressed, while same-turn duplicates from stale cache are
+    still caught.
+    """
+    for m in reversed(messages):
+        if m.role == role:
+            if m.content == content:
+                return True
+        else:
+            break
+    return False
+
+
+def maybe_append_user_message(
+    session: "ChatSession",
+    message: str | None,
+    is_user_message: bool,
+) -> bool:
+    """Append a user/assistant message to the session if not already present.
+
+    The route handler already persists the user message before enqueueing,
+    so we check trailing same-role messages to avoid re-appending when the
+    session cache is slightly stale.
+
+    Returns True if the message was appended, False if skipped.
+    """
+    if not message:
+        return False
+    role = "user" if is_user_message else "assistant"
+    if is_message_duplicate(session.messages, role, message):
+        return False
+    session.messages.append(ChatMessage(role=role, content=message))
+    return True
 
 
 class Usage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    # Cache breakdown (Anthropic-specific; zero for non-Anthropic models)
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
 
 
 class ChatSessionInfo(BaseModel):
@@ -85,6 +145,12 @@ class ChatSessionInfo(BaseModel):
     updated_at: datetime
     successful_agent_runs: dict[str, int] = {}
     successful_agent_schedules: dict[str, int] = {}
+    metadata: ChatSessionMetadata = ChatSessionMetadata()
+
+    @property
+    def dry_run(self) -> bool:
+        """Convenience accessor for ``metadata.dry_run``."""
+        return self.metadata.dry_run
 
     @classmethod
     def from_db(cls, prisma_session: PrismaChatSession) -> Self:
@@ -98,7 +164,14 @@ class ChatSessionInfo(BaseModel):
             prisma_session.successfulAgentSchedules, default={}
         )
 
-        # Calculate usage from token counts
+        # Parse typed metadata from the JSON column.
+        raw_metadata = _parse_json_field(prisma_session.metadata, default={})
+        metadata = ChatSessionMetadata.model_validate(raw_metadata)
+
+        # Calculate usage from token counts.
+        # NOTE: Per-turn cache_read_tokens / cache_creation_tokens breakdown
+        # is lost after persistence — the DB only stores aggregate prompt and
+        # completion totals. This is a known limitation.
         usage = []
         if prisma_session.totalPromptTokens or prisma_session.totalCompletionTokens:
             usage.append(
@@ -120,6 +193,7 @@ class ChatSessionInfo(BaseModel):
             updated_at=prisma_session.updatedAt,
             successful_agent_runs=successful_agent_runs,
             successful_agent_schedules=successful_agent_schedules,
+            metadata=metadata,
         )
 
 
@@ -127,7 +201,7 @@ class ChatSession(ChatSessionInfo):
     messages: list[ChatMessage]
 
     @classmethod
-    def new(cls, user_id: str) -> Self:
+    def new(cls, user_id: str, *, dry_run: bool) -> Self:
         return cls(
             session_id=str(uuid.uuid4()),
             user_id=user_id,
@@ -137,6 +211,7 @@ class ChatSession(ChatSessionInfo):
             credentials={},
             started_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),
+            metadata=ChatSessionMetadata(dry_run=dry_run),
         )
 
     @classmethod
@@ -469,8 +544,16 @@ async def upsert_chat_session(
             )
             db_error = e
 
-        # Save to cache (best-effort, even if DB failed)
+        # Save to cache (best-effort, even if DB failed).
+        # Title updates (update_session_title) run *outside* this lock because
+        # they only touch the title field, not messages.  So a concurrent rename
+        # or auto-title may have written a newer title to Redis while this
+        # upsert was in progress.  Always prefer the cached title to avoid
+        # overwriting it with the stale in-memory copy.
         try:
+            existing_cached = await _get_session_from_cache(session.session_id)
+            if existing_cached and existing_cached.title:
+                session = session.model_copy(update={"title": existing_cached.title})
             await cache_chat_session(session)
         except Exception as e:
             # If DB succeeded but cache failed, raise cache error
@@ -516,6 +599,7 @@ async def _save_session_to_db(
             await db.create_chat_session(
                 session_id=session.session_id,
                 user_id=session.user_id,
+                metadata=session.metadata,
             )
             existing_message_count = 0
 
@@ -560,6 +644,12 @@ async def _save_session_to_db(
             start_sequence=existing_message_count,
         )
 
+        # Back-fill sequence numbers on the in-memory ChatMessage objects so
+        # that downstream callers (inject_user_context) can persist updates
+        # by sequence rather than falling back to index-based writes.
+        for i, msg in enumerate(new_messages):
+            msg.sequence = existing_message_count + i
+
 
 async def append_and_save_message(session_id: str, message: ChatMessage) -> ChatSession:
     """Atomically append a message to a session and persist it.
@@ -593,21 +683,27 @@ async def append_and_save_message(session_id: str, message: ChatMessage) -> Chat
         return session
 
 
-async def create_chat_session(user_id: str) -> ChatSession:
+async def create_chat_session(user_id: str, *, dry_run: bool) -> ChatSession:
     """Create a new chat session and persist it.
+
+    Args:
+        user_id: The authenticated user ID.
+        dry_run: When True, run_block and run_agent tool calls in this
+            session are forced to use dry-run simulation mode.
 
     Raises:
         DatabaseError: If the database write fails. We fail fast to ensure
             callers never receive a non-persisted session that only exists
             in cache (which would be lost when the cache expires).
     """
-    session = ChatSession.new(user_id)
+    session = ChatSession.new(user_id, dry_run=dry_run)
 
     # Create in database first - fail fast if this fails
     try:
         await chat_db().create_chat_session(
             session_id=session.session_id,
             user_id=user_id,
+            metadata=session.metadata,
         )
     except Exception as e:
         logger.error(f"Failed to create session {session.session_id} in database: {e}")
@@ -672,27 +768,47 @@ async def delete_chat_session(session_id: str, user_id: str | None = None) -> bo
     async with _session_locks_mutex:
         _session_locks.pop(session_id, None)
 
+    # Shut down any local browser daemon for this session (best-effort).
+    # Inline import required: all tool modules import ChatSession from this
+    # module, so any top-level import from tools.* would create a cycle.
+    try:
+        from .tools.agent_browser import close_browser_session
+
+        await close_browser_session(session_id, user_id=user_id)
+    except Exception as e:
+        logger.debug(f"Browser cleanup for session {session_id}: {e}")
+
     return True
 
 
-async def update_session_title(session_id: str, title: str) -> bool:
-    """Update only the title of a chat session.
+async def update_session_title(
+    session_id: str,
+    user_id: str,
+    title: str,
+    *,
+    only_if_empty: bool = False,
+) -> bool:
+    """Update the title of a chat session, scoped to the owning user.
 
-    This is a lightweight operation that doesn't touch messages, avoiding
-    race conditions with concurrent message updates. Use this for background
-    title generation instead of upsert_chat_session.
+    Lightweight operation that doesn't touch messages, avoiding race conditions
+    with concurrent message updates.
 
     Args:
         session_id: The session ID to update.
+        user_id: Owning user — the DB query filters on this.
         title: The new title to set.
+        only_if_empty: When True, uses an atomic ``UPDATE WHERE title IS NULL``
+            so auto-generated titles never overwrite a user-set title.
 
     Returns:
-        True if updated successfully, False otherwise.
+        True if updated successfully, False otherwise (not found, wrong user,
+        or — when only_if_empty — title was already set).
     """
     try:
-        result = await chat_db().update_chat_session(session_id=session_id, title=title)
-        if result is None:
-            logger.warning(f"Session {session_id} not found for title update")
+        updated = await chat_db().update_chat_session_title(
+            session_id, user_id, title, only_if_empty=only_if_empty
+        )
+        if not updated:
             return False
 
         # Update title in cache if it exists (instead of invalidating).
@@ -704,9 +820,8 @@ async def update_session_title(session_id: str, title: str) -> bool:
                 cached.title = title
                 await cache_chat_session(cached)
         except Exception as e:
-            # Not critical - title will be correct on next full cache refresh
             logger.warning(
-                f"Failed to update title in cache for session {session_id}: {e}"
+                f"Cache title update failed for session {session_id} (non-critical): {e}"
             )
 
         return True

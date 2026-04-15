@@ -155,6 +155,7 @@ class WorkspaceManager:
         path: Optional[str] = None,
         mime_type: Optional[str] = None,
         overwrite: bool = False,
+        metadata: Optional[dict] = None,
     ) -> WorkspaceFile:
         """
         Write file to workspace.
@@ -168,6 +169,7 @@ class WorkspaceManager:
             path: Virtual path (defaults to "/{filename}", session-scoped if session_id set)
             mime_type: MIME type (auto-detected if not provided)
             overwrite: Whether to overwrite existing file at path
+            metadata: Optional metadata dict (e.g., origin tracking)
 
         Returns:
             Created WorkspaceFile instance
@@ -183,7 +185,8 @@ class WorkspaceManager:
                 f"{Config().max_file_size_mb}MB limit"
             )
 
-        # Virus scan content before persisting (defense in depth)
+        # Scan here — callers must NOT duplicate this scan.
+        # WorkspaceManager owns virus scanning for all persisted files.
         await scan_content_safe(content, filename=filename)
 
         # Determine path with session scoping
@@ -228,52 +231,44 @@ class WorkspaceManager:
 
         # Create database record - handle race condition where another request
         # created a file at the same path between our check and create
-        try:
-            file = await db.create_workspace_file(
-                workspace_id=self.workspace_id,
-                file_id=file_id,
-                name=filename,
-                path=path,
-                storage_path=storage_path,
-                mime_type=mime_type,
-                size_bytes=len(content),
-                checksum=checksum,
-            )
-        except UniqueViolationError:
-            # Race condition: another request created a file at this path
-            if overwrite:
-                # Re-fetch and delete the conflicting file, then retry
-                existing = await db.get_workspace_file_by_path(self.workspace_id, path)
-                if existing:
-                    await self.delete_file(existing.id)
-                # Retry the create - if this also fails, clean up storage file
-                try:
-                    file = await db.create_workspace_file(
-                        workspace_id=self.workspace_id,
-                        file_id=file_id,
-                        name=filename,
-                        path=path,
-                        storage_path=storage_path,
-                        mime_type=mime_type,
-                        size_bytes=len(content),
-                        checksum=checksum,
+        async def _persist_db_record(
+            retries: int = 2 if overwrite else 0,
+        ) -> WorkspaceFile:
+            """Create DB record, retrying on conflict if overwrite=True.
+
+            Cleans up the orphaned storage file on any failure.
+            """
+            try:
+                return await db.create_workspace_file(
+                    workspace_id=self.workspace_id,
+                    file_id=file_id,
+                    name=filename,
+                    path=path,
+                    storage_path=storage_path,
+                    mime_type=mime_type,
+                    size_bytes=len(content),
+                    checksum=checksum,
+                    metadata=metadata,
+                )
+            except UniqueViolationError:
+                if retries > 0:
+                    # Delete conflicting file and retry
+                    existing = await db.get_workspace_file_by_path(
+                        self.workspace_id, path
                     )
-                except Exception:
-                    # Clean up orphaned storage file on retry failure
-                    try:
-                        await storage.delete(storage_path)
-                    except Exception as e:
-                        logger.warning(f"Failed to clean up orphaned storage file: {e}")
-                    raise
-            else:
-                # Clean up the orphaned storage file before raising
-                try:
-                    await storage.delete(storage_path)
-                except Exception as e:
-                    logger.warning(f"Failed to clean up orphaned storage file: {e}")
+                    if existing:
+                        await self.delete_file(existing.id)
+                    return await _persist_db_record(retries=retries - 1)
+                if overwrite:
+                    raise ValueError(
+                        f"Unable to overwrite file at path: {path} "
+                        f"(concurrent write conflict)"
+                    ) from None
                 raise ValueError(f"File already exists at path: {path}")
+
+        try:
+            file = await _persist_db_record()
         except Exception:
-            # Any other database error (connection, validation, etc.) - clean up storage
             try:
                 await storage.delete(storage_path)
             except Exception as e:

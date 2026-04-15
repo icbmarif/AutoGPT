@@ -8,7 +8,6 @@ import prisma.errors
 import prisma.models
 import prisma.types
 
-import backend.api.features.store.exceptions as store_exceptions
 import backend.api.features.store.image_gen as store_image_gen
 import backend.api.features.store.media as store_media
 import backend.data.graph as graph_db
@@ -251,7 +250,7 @@ async def get_library_agent(id: str, user_id: str) -> library_model.LibraryAgent
         The requested LibraryAgent.
 
     Raises:
-        AgentNotFoundError: If the specified agent does not exist.
+        NotFoundError: If the specified agent does not exist.
         DatabaseError: If there's an error during retrieval.
     """
     library_agent = await prisma.models.LibraryAgent.prisma().find_first(
@@ -337,12 +336,15 @@ async def get_library_agent_by_graph_id(
     user_id: str,
     graph_id: str,
     graph_version: Optional[int] = None,
+    include_archived: bool = False,
 ) -> library_model.LibraryAgent | None:
     filter: prisma.types.LibraryAgentWhereInput = {
         "agentGraphId": graph_id,
         "userId": user_id,
         "isDeleted": False,
     }
+    if not include_archived:
+        filter["isArchived"] = False
     if graph_version is not None:
         filter["agentGraphVersion"] = graph_version
 
@@ -398,6 +400,7 @@ async def create_library_agent(
     hitl_safe_mode: bool = True,
     sensitive_action_safe_mode: bool = False,
     create_library_agents_for_sub_graphs: bool = True,
+    folder_id: str | None = None,
 ) -> list[library_model.LibraryAgent]:
     """
     Adds an agent to the user's library (LibraryAgent table).
@@ -414,12 +417,18 @@ async def create_library_agent(
         If the graph has sub-graphs, the parent graph will always be the first entry in the list.
 
     Raises:
-        AgentNotFoundError: If the specified agent does not exist.
+        NotFoundError: If the specified agent does not exist.
         DatabaseError: If there's an error during creation or if image generation fails.
     """
     logger.info(
         f"Creating library agent for graph #{graph.id} v{graph.version}; user:<redacted>"
     )
+
+    # Authorization: FK only checks existence, not ownership.
+    # Verify the folder belongs to this user to prevent cross-user nesting.
+    if folder_id:
+        await get_folder(folder_id, user_id)
+
     graph_entries = (
         [graph, *graph.sub_graphs] if create_library_agents_for_sub_graphs else [graph]
     )
@@ -427,28 +436,58 @@ async def create_library_agent(
     async with transaction() as tx:
         library_agents = await asyncio.gather(
             *(
-                prisma.models.LibraryAgent.prisma(tx).create(
-                    data=prisma.types.LibraryAgentCreateInput(
-                        isCreatedByUser=(user_id == user_id),
-                        useGraphIsActiveVersion=True,
-                        User={"connect": {"id": user_id}},
-                        # Creator={"connect": {"id": user_id}},
-                        AgentGraph={
-                            "connect": {
-                                "graphVersionId": {
-                                    "id": graph_entry.id,
-                                    "version": graph_entry.version,
+                prisma.models.LibraryAgent.prisma(tx).upsert(
+                    where={
+                        "userId_agentGraphId_agentGraphVersion": {
+                            "userId": user_id,
+                            "agentGraphId": graph_entry.id,
+                            "agentGraphVersion": graph_entry.version,
+                        }
+                    },
+                    data={
+                        "create": prisma.types.LibraryAgentCreateInput(
+                            isCreatedByUser=(user_id == graph.user_id),
+                            useGraphIsActiveVersion=True,
+                            User={"connect": {"id": user_id}},
+                            AgentGraph={
+                                "connect": {
+                                    "graphVersionId": {
+                                        "id": graph_entry.id,
+                                        "version": graph_entry.version,
+                                    }
                                 }
-                            }
-                        },
-                        settings=SafeJson(
-                            GraphSettings.from_graph(
-                                graph_entry,
-                                hitl_safe_mode=hitl_safe_mode,
-                                sensitive_action_safe_mode=sensitive_action_safe_mode,
-                            ).model_dump()
+                            },
+                            settings=SafeJson(
+                                GraphSettings.from_graph(
+                                    graph_entry,
+                                    hitl_safe_mode=hitl_safe_mode,
+                                    sensitive_action_safe_mode=sensitive_action_safe_mode,
+                                ).model_dump()
+                            ),
+                            **(
+                                {"Folder": {"connect": {"id": folder_id}}}
+                                if folder_id and graph_entry is graph
+                                else {}
+                            ),
                         ),
-                    ),
+                        "update": {
+                            "isDeleted": False,
+                            "isArchived": False,
+                            "useGraphIsActiveVersion": True,
+                            "settings": SafeJson(
+                                GraphSettings.from_graph(
+                                    graph_entry,
+                                    hitl_safe_mode=hitl_safe_mode,
+                                    sensitive_action_safe_mode=sensitive_action_safe_mode,
+                                ).model_dump()
+                            ),
+                            **(
+                                {"Folder": {"connect": {"id": folder_id}}}
+                                if folder_id and graph_entry is graph
+                                else {}
+                            ),
+                        },
+                    },
                     include=library_agent_include(
                         user_id, include_nodes=False, include_executions=False
                     ),
@@ -529,6 +568,7 @@ async def update_agent_version_in_library(
 async def create_graph_in_library(
     graph: graph_db.Graph,
     user_id: str,
+    folder_id: str | None = None,
 ) -> tuple[graph_db.GraphModel, library_model.LibraryAgent]:
     """Create a new graph and add it to the user's library."""
     graph.version = 1
@@ -542,6 +582,7 @@ async def create_graph_in_library(
         user_id=user_id,
         sensitive_action_safe_mode=True,
         create_library_agents_for_sub_graphs=False,
+        folder_id=folder_id,
     )
 
     if created_graph.is_active:
@@ -570,7 +611,9 @@ async def update_graph_in_library(
 
     created_graph = await graph_db.create_graph(graph_model, user_id)
 
-    library_agent = await get_library_agent_by_graph_id(user_id, created_graph.id)
+    library_agent = await get_library_agent_by_graph_id(
+        user_id, created_graph.id, include_archived=True
+    )
     if not library_agent:
         raise NotFoundError(f"Library agent not found for graph {created_graph.id}")
 
@@ -806,92 +849,38 @@ async def delete_library_agent_by_graph_id(graph_id: str, user_id: str) -> None:
 async def add_store_agent_to_library(
     store_listing_version_id: str, user_id: str
 ) -> library_model.LibraryAgent:
+    """Adds a marketplace agent to the user’s library.
+
+    See also: `add_store_agent_to_library_as_admin()` which uses
+    `get_graph_as_admin` to bypass marketplace status checks for admin review.
     """
-    Adds an agent from a store listing version to the user's library if they don't already have it.
+    from ._add_to_library import add_graph_to_library, resolve_graph_for_library
 
-    Args:
-        store_listing_version_id: The ID of the store listing version containing the agent.
-        user_id: The user’s library to which the agent is being added.
-
-    Returns:
-        The newly created LibraryAgent if successfully added, the existing corresponding one if any.
-
-    Raises:
-        AgentNotFoundError: If the store listing or associated agent is not found.
-        DatabaseError: If there's an issue creating the LibraryAgent record.
-    """
     logger.debug(
         f"Adding agent from store listing version #{store_listing_version_id} "
         f"to library for user #{user_id}"
     )
-
-    store_listing_version = (
-        await prisma.models.StoreListingVersion.prisma().find_unique(
-            where={"id": store_listing_version_id}, include={"AgentGraph": True}
-        )
+    graph_model = await resolve_graph_for_library(
+        store_listing_version_id, user_id, admin=False
     )
-    if not store_listing_version or not store_listing_version.AgentGraph:
-        logger.warning(f"Store listing version not found: {store_listing_version_id}")
-        raise store_exceptions.AgentNotFoundError(
-            f"Store listing version {store_listing_version_id} not found or invalid"
-        )
+    return await add_graph_to_library(store_listing_version_id, graph_model, user_id)
 
-    graph = store_listing_version.AgentGraph
 
-    # Convert to GraphModel to check for HITL blocks
-    graph_model = await graph_db.get_graph(
-        graph_id=graph.id,
-        version=graph.version,
-        user_id=user_id,
-        include_subgraphs=False,
+async def add_store_agent_to_library_as_admin(
+    store_listing_version_id: str, user_id: str
+) -> library_model.LibraryAgent:
+    """Admin variant that uses `get_graph_as_admin` to bypass marketplace
+    APPROVED-only checks, allowing admins to add pending agents for review."""
+    from ._add_to_library import add_graph_to_library, resolve_graph_for_library
+
+    logger.warning(
+        f"ADMIN adding agent from store listing version "
+        f"#{store_listing_version_id} to library for user #{user_id}"
     )
-    if not graph_model:
-        raise store_exceptions.AgentNotFoundError(
-            f"Graph #{graph.id} v{graph.version} not found or accessible"
-        )
-
-    # Check if user already has this agent (non-deleted)
-    if existing := await get_library_agent_by_graph_id(
-        user_id, graph.id, graph.version
-    ):
-        return existing
-
-    # Check for soft-deleted version and restore it
-    deleted_agent = await prisma.models.LibraryAgent.prisma().find_unique(
-        where={
-            "userId_agentGraphId_agentGraphVersion": {
-                "userId": user_id,
-                "agentGraphId": graph.id,
-                "agentGraphVersion": graph.version,
-            }
-        },
+    graph_model = await resolve_graph_for_library(
+        store_listing_version_id, user_id, admin=True
     )
-    if deleted_agent and deleted_agent.isDeleted:
-        return await update_library_agent(deleted_agent.id, user_id, is_deleted=False)
-
-    # Create LibraryAgent entry
-    added_agent = await prisma.models.LibraryAgent.prisma().create(
-        data={
-            "User": {"connect": {"id": user_id}},
-            "AgentGraph": {
-                "connect": {
-                    "graphVersionId": {"id": graph.id, "version": graph.version}
-                }
-            },
-            "isCreatedByUser": False,
-            "useGraphIsActiveVersion": False,
-            "settings": SafeJson(GraphSettings.from_graph(graph_model).model_dump()),
-        },
-        include=library_agent_include(
-            user_id, include_nodes=False, include_executions=False
-        ),
-    )
-    logger.debug(
-        f"Added graph #{graph.id} v{graph.version}"
-        f"for store listing version #{store_listing_version.id} "
-        f"to library for user #{user_id}"
-    )
-    return library_model.LibraryAgent.from_db(added_agent)
+    return await add_graph_to_library(store_listing_version_id, graph_model, user_id)
 
 
 ##############################################
@@ -1479,6 +1468,67 @@ async def bulk_move_agents_to_folder(
     )
 
     return [library_model.LibraryAgent.from_db(agent) for agent in agents]
+
+
+def collect_tree_ids(
+    nodes: list[library_model.LibraryFolderTree],
+    visited: set[str] | None = None,
+) -> list[str]:
+    """Collect all folder IDs from a folder tree."""
+    if visited is None:
+        visited = set()
+    ids: list[str] = []
+    for n in nodes:
+        if n.id in visited:
+            continue
+        visited.add(n.id)
+        ids.append(n.id)
+        ids.extend(collect_tree_ids(n.children, visited))
+    return ids
+
+
+async def get_folder_agent_summaries(
+    user_id: str, folder_id: str
+) -> list[dict[str, str | None]]:
+    """Get a lightweight list of agents in a folder (id, name, description)."""
+    all_agents: list[library_model.LibraryAgent] = []
+    for page in itertools.count(1):
+        resp = await list_library_agents(
+            user_id=user_id, folder_id=folder_id, page=page
+        )
+        all_agents.extend(resp.agents)
+        if page >= resp.pagination.total_pages:
+            break
+    return [
+        {"id": a.id, "name": a.name, "description": a.description} for a in all_agents
+    ]
+
+
+async def get_root_agent_summaries(
+    user_id: str,
+) -> list[dict[str, str | None]]:
+    """Get a lightweight list of root-level agents (folderId IS NULL)."""
+    all_agents: list[library_model.LibraryAgent] = []
+    for page in itertools.count(1):
+        resp = await list_library_agents(
+            user_id=user_id, include_root_only=True, page=page
+        )
+        all_agents.extend(resp.agents)
+        if page >= resp.pagination.total_pages:
+            break
+    return [
+        {"id": a.id, "name": a.name, "description": a.description} for a in all_agents
+    ]
+
+
+async def get_folder_agents_map(
+    user_id: str, folder_ids: list[str]
+) -> dict[str, list[dict[str, str | None]]]:
+    """Get agent summaries for multiple folders concurrently."""
+    results = await asyncio.gather(
+        *(get_folder_agent_summaries(user_id, fid) for fid in folder_ids)
+    )
+    return dict(zip(folder_ids, results))
 
 
 ##############################################

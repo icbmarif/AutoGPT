@@ -89,6 +89,10 @@ class Config(UpdateTrackingModel["Config"], BaseSettings):
         le=500,
         description="Thread pool size for FastAPI sync operations. All sync endpoints and dependencies automatically use this pool. Higher values support more concurrent sync operations but use more memory.",
     )
+    ollama_host: str = Field(
+        default="localhost:11434",
+        description="Default Ollama host; exempted from SSRF checks.",
+    )
     pyro_host: str = Field(
         default="localhost",
         description="The default hostname of the Pyro server.",
@@ -363,23 +367,6 @@ class Config(UpdateTrackingModel["Config"], BaseSettings):
         description="Whether to mark failed scans as clean or not",
     )
 
-    agentgenerator_host: str = Field(
-        default="",
-        description="The host for the Agent Generator service (empty to use built-in)",
-    )
-    agentgenerator_port: int = Field(
-        default=8000,
-        description="The port for the Agent Generator service",
-    )
-    agentgenerator_timeout: int = Field(
-        default=1800,
-        description="The timeout in seconds for Agent Generator service requests (includes retries for rate limits)",
-    )
-    agentgenerator_use_dummy: bool = Field(
-        default=False,
-        description="Use dummy agent generator responses for testing (bypasses external service)",
-    )
-
     enable_example_blocks: bool = Field(
         default=False,
         description="Whether to enable example blocks in production",
@@ -411,6 +398,13 @@ class Config(UpdateTrackingModel["Config"], BaseSettings):
         ge=1,
         le=1024,
         description="Maximum file size in MB for workspace files (1-1024 MB)",
+    )
+
+    max_workspace_storage_mb: int = Field(
+        default=500,
+        ge=1,
+        le=10240,
+        description="Maximum total workspace storage per user in MB.",
     )
 
     # AutoMod configuration
@@ -714,6 +708,8 @@ class Secrets(UpdateTrackingModel["Secrets"], BaseSettings):
         description="The LaunchDarkly SDK key for feature flag management",
     )
 
+    agentmail_api_key: str = Field(default="", description="AgentMail API Key")
+
     ayrshare_api_key: str = Field(default="", description="Ayrshare API Key")
     ayrshare_jwt_key: str = Field(default="", description="Ayrshare private Key")
 
@@ -722,6 +718,9 @@ class Secrets(UpdateTrackingModel["Secrets"], BaseSettings):
     langfuse_secret_key: str = Field(default="", description="Langfuse secret key")
     langfuse_host: str = Field(
         default="https://cloud.langfuse.com", description="Langfuse host URL"
+    )
+    langfuse_tracing_environment: str = Field(
+        default="local", description="Tracing environment tag (local/dev/production)"
     )
 
     # PostHog analytics
