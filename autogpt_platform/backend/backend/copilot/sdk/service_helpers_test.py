@@ -17,7 +17,6 @@ from .conftest import build_test_transcript as _build_transcript
 from .service import (
     _RETRY_TARGET_TOKENS,
     ReducedContext,
-    _RestoreResult,
     _is_prompt_too_long,
     _is_tool_only_message,
     _iter_sdk_messages,
@@ -689,10 +688,7 @@ class TestRestoreCliSessionModeCheck:
         from datetime import UTC, datetime
 
         from backend.copilot.model import ChatMessage, ChatSession
-        from backend.copilot.transcript import (
-            STOP_REASON_END_TURN,
-            TranscriptDownload,
-        )
+        from backend.copilot.transcript import STOP_REASON_END_TURN, TranscriptDownload
         from backend.copilot.transcript_builder import TranscriptBuilder
 
         lines = [

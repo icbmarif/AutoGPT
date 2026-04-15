@@ -1026,9 +1026,7 @@ class TestRestoreCliSession:
         from .transcript import download_transcript
 
         content = b'{"type":"assistant"}\n'
-        meta_bytes = json.dumps(
-            {"message_count": 2, "mode": "unknown_mode"}
-        ).encode()
+        meta_bytes = json.dumps({"message_count": 2, "mode": "unknown_mode"}).encode()
 
         mock_storage = AsyncMock()
         mock_storage.retrieve.side_effect = [content, meta_bytes]

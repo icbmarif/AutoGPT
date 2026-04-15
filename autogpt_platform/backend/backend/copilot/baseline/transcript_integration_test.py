@@ -748,7 +748,9 @@ class TestAppendGapToBuilder:
         """A tool_call dict with no 'function' key uses 'unknown' as the tool name."""
         builder = TranscriptBuilder()
         # Tool call dict exists but 'function' sub-dict is missing entirely
-        msgs = [ChatMessage(role="assistant", content=None, tool_calls=[{"id": "tc-x"}])]
+        msgs = [
+            ChatMessage(role="assistant", content=None, tool_calls=[{"id": "tc-x"}])
+        ]
         _append_gap_to_builder(msgs, builder)
         assert builder.entry_count == 1
         jsonl = builder.to_jsonl()
