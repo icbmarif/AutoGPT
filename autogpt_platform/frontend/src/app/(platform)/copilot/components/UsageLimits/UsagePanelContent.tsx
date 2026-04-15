@@ -75,11 +75,23 @@ function UsageBar({
 }
 
 export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  if (bytes < 1024 * 1024 * 1024)
-    return `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  const KB = 1024;
+  const MB = KB * 1024;
+  const GB = MB * 1024;
+  if (bytes < KB) return `${bytes} B`;
+  if (bytes < MB) {
+    const kb = bytes / KB;
+    return kb >= 1000
+      ? `${(bytes / MB).toFixed(1)} MB`
+      : `${Math.round(kb)} KB`;
+  }
+  if (bytes < GB) {
+    const mb = bytes / MB;
+    return mb >= 1000
+      ? `${(bytes / GB).toFixed(1)} GB`
+      : `${Math.round(mb)} MB`;
+  }
+  return `${(bytes / GB).toFixed(1)} GB`;
 }
 
 function StorageBar({

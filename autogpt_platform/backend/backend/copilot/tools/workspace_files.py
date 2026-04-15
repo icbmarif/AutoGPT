@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
+from backend.api.features.store.exceptions import VirusDetectedError, VirusScanError
 from backend.copilot.context import (
     E2B_WORKDIR,
     get_current_sandbox,
@@ -893,17 +894,16 @@ class WriteWorkspaceFileTool(BaseTool):
                 message=msg,
                 session_id=session_id,
             )
+        except VirusDetectedError as e:
+            logger.warning(f"Virus detected in uploaded file: {e.threat_name}")
+            return ErrorResponse(message=str(e), session_id=session_id)
+        except VirusScanError as e:
+            logger.error(f"Virus scan infrastructure error: {e}", exc_info=True)
+            return ErrorResponse(message=str(e), session_id=session_id)
         except ValueError as e:
-            # Log infrastructure failures (e.g., VirusScanError from ClamAV
-            # outage) at ERROR; user-facing errors (quota, conflict) are fine
-            # at default level since the message is self-explanatory.
-            from backend.api.features.store.exceptions import VirusScanError
-
-            if isinstance(e, VirusScanError):
-                logger.error("Virus scan infrastructure error: %s", e, exc_info=True)
             return ErrorResponse(message=str(e), session_id=session_id)
         except Exception as e:
-            logger.error("Error writing workspace file: %s", e, exc_info=True)
+            logger.error(f"Error writing workspace file: {e}", exc_info=True)
             return ErrorResponse(
                 message=f"Failed to write workspace file: {e}",
                 error=str(e),
