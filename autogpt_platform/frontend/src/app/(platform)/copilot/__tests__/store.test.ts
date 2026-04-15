@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, vi } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { useCopilotUIStore } from "../store";
 
 vi.mock("@sentry/nextjs", () => ({
@@ -241,5 +241,26 @@ describe("useCopilotUIStore", () => {
       useCopilotUIStore.getState().setShowNotificationDialog(false);
       expect(useCopilotUIStore.getState().showNotificationDialog).toBe(false);
     });
+  });
+});
+
+describe("useCopilotUIStore localStorage initialisation", () => {
+  afterEach(() => {
+    vi.resetModules();
+    window.localStorage.clear();
+  });
+
+  it("reads fast chat mode from localStorage on store creation", async () => {
+    window.localStorage.setItem("copilot-mode", "fast");
+    vi.resetModules();
+    const { useCopilotUIStore: fresh } = await import("../store");
+    expect(fresh.getState().copilotChatMode).toBe("fast");
+  });
+
+  it("reads advanced model from localStorage on store creation", async () => {
+    window.localStorage.setItem("copilot-model", "advanced");
+    vi.resetModules();
+    const { useCopilotUIStore: fresh } = await import("../store");
+    expect(fresh.getState().copilotLlmModel).toBe("advanced");
   });
 });
