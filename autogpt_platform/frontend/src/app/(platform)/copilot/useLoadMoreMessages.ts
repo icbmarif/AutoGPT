@@ -193,7 +193,11 @@ export function useLoadMoreMessages({
     setPagedRawMessages([]);
     setOldestSequence(initialOldestSequence);
     setNewestSequence(initialNewestSequence);
-    setHasMore(initialHasMore);
+    // Set hasMore=false during the session-transition window so no loadMore
+    // fires with forward pagination (after_sequence) on the now-active session.
+    // The useEffect will restore hasMore from the parent after the refetch
+    // completes and forwardPaginated switches to false.
+    setHasMore(false);
     isLoadingMoreRef.current = false;
     consecutiveErrorsRef.current = 0;
     epochRef.current += 1;
