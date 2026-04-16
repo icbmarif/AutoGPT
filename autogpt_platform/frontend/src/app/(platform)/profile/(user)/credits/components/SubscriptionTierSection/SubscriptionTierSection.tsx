@@ -248,7 +248,7 @@ export function SubscriptionTierSection() {
           <p className="text-sm text-neutral-600 dark:text-neutral-400">
             {subscription &&
               subscription.proration_credit_cents > 0 &&
-              `Your unused ${currentTier.charAt(0) + currentTier.slice(1).toLowerCase()} subscription ($${(subscription.proration_credit_cents / 100).toFixed(2)}) will be added to your account balance. `}
+              `Your unused ${currentTier.charAt(0) + currentTier.slice(1).toLowerCase()} subscription ($${(subscription.proration_credit_cents / 100).toFixed(2)}) will be applied as a credit to your next Stripe invoice. `}
             You will be redirected to Stripe to complete your upgrade to{" "}
             {TIERS.find((t) => t.key === pendingUpgradeTier)?.label ??
               pendingUpgradeTier}
