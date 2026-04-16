@@ -44,6 +44,7 @@ from backend.util.exceptions import NotFoundError
 from backend.util.settings import Settings
 
 from ..config import ChatConfig, CopilotLlmModel, CopilotMode
+from ..db import update_message_tool_calls
 from ..constants import (
     COPILOT_ERROR_PREFIX,
     COPILOT_RETRYABLE_ERROR_PREFIX,
@@ -2261,6 +2262,30 @@ async def _run_stream_attempt(
                 )
                 if dispatched is not None:
                     yield dispatched
+
+            # If tool calls arrived this batch AND the assistant message was
+            # already flushed to DB (sequence is set), patch the existing row
+            # so tool_calls are not lost.  The append-only save (start_sequence)
+            # in _save_session_to_db never re-saves already-persisted rows, so
+            # without this patch the assistant row keeps tool_calls=null.
+            if acc.assistant_response.sequence is not None and any(
+                isinstance(r, StreamToolInputAvailable) for r in adapter_responses
+            ):
+                try:
+                    await asyncio.shield(
+                        update_message_tool_calls(
+                            ctx.session.session_id,
+                            acc.assistant_response.sequence,
+                            acc.accumulated_tool_calls,
+                        )
+                    )
+                except Exception as patch_err:
+                    logger.warning(
+                        "%s tool_calls DB patch failed (sequence=%d): %s",
+                        ctx.log_prefix,
+                        acc.assistant_response.sequence,
+                        patch_err,
+                    )
 
             # Append assistant entry AFTER convert_message so that
             # any stashed tool results from the previous turn are

@@ -20,7 +20,11 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 from backend.copilot.model import ChatMessage, ChatSession
-from backend.copilot.response_model import StreamStartStep, StreamTextDelta
+from backend.copilot.response_model import (
+    StreamStartStep,
+    StreamTextDelta,
+    StreamToolInputAvailable,
+)
 from backend.copilot.sdk.service import _dispatch_response, _StreamAccumulator
 
 _NOW = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -215,3 +219,100 @@ class TestPreCreateAssistantMessage:
             _simulate_pre_create(acc, ctx)
 
         assert len(ctx.session.messages) == 0
+
+
+class TestToolCallsLostAfterIntermediateFlush:
+    """Regression tests for the bug where tool_calls are lost when an
+    intermediate flush saves the assistant message before StreamToolInputAvailable
+    arrives.
+
+    Sequence that triggers the bug:
+    1. StreamTextDelta → assistant message appended with tool_calls=None
+    2. Intermediate flush fires (time/count threshold) → DB row written with tool_calls=null
+       and acc.assistant_response.sequence is set (back-filled)
+    3. StreamToolInputAvailable → acc.assistant_response.tool_calls mutated in-memory
+    4. Final save: append-only — assistant row already in DB, tool_calls never updated
+
+    Fix: when StreamToolInputAvailable arrives and acc.assistant_response.sequence
+    is not None, issue a DB UPDATE to patch toolCalls on the existing row.
+    """
+
+    def test_text_delta_then_tool_input_sets_tool_calls_on_message(self) -> None:
+        """After text arrives then tool input arrives, acc.assistant_response.tool_calls
+        should be populated regardless of flush state."""
+        session = _make_session()
+        ctx = _make_ctx(session)
+        state = _make_state()
+        acc = _StreamAccumulator(
+            assistant_response=ChatMessage(role="assistant", content=""),
+            accumulated_tool_calls=[],
+        )
+
+        # Step 1: text delta arrives, message appended
+        _dispatch_response(
+            StreamTextDelta(id="t1", delta="Let me run that for you."),
+            acc,
+            ctx,
+            state,
+            False,
+            "[test]",
+        )
+        assert acc.has_appended_assistant
+        assert session.messages[-1].tool_calls is None
+
+        # Step 2: simulate intermediate flush back-filling the sequence
+        acc.assistant_response.sequence = 1  # back-filled by _save_session_to_db
+
+        # Step 3: tool input arrives
+        _dispatch_response(
+            StreamToolInputAvailable(
+                toolCallId="call_abc",
+                toolName="bash_exec",
+                input={"command": "ls"},
+            ),
+            acc,
+            ctx,
+            state,
+            False,
+            "[test]",
+        )
+
+        # tool_calls should be set in memory
+        assert acc.assistant_response.tool_calls is not None
+        assert len(acc.assistant_response.tool_calls) == 1
+        assert acc.assistant_response.tool_calls[0]["id"] == "call_abc"
+
+    def test_sequence_set_when_flush_occurred_before_tool_input(self) -> None:
+        """When sequence is back-filled (flush happened) before tool calls arrive,
+        it is detectable so the caller can issue a DB patch."""
+        acc = _StreamAccumulator(
+            assistant_response=ChatMessage(role="assistant", content="hello"),
+            accumulated_tool_calls=[],
+            has_appended_assistant=True,
+        )
+        # Simulate flush back-fill
+        acc.assistant_response.sequence = 3
+
+        ctx = _make_ctx()
+        state = _make_state()
+
+        _dispatch_response(
+            StreamToolInputAvailable(
+                toolCallId="call_xyz",
+                toolName="run_block",
+                input={},
+            ),
+            acc,
+            ctx,
+            state,
+            False,
+            "[test]",
+        )
+
+        # Caller should detect this condition and issue a DB patch
+        needs_db_patch = acc.assistant_response.sequence is not None and bool(
+            acc.accumulated_tool_calls
+        )
+        assert (
+            needs_db_patch
+        ), "Expected needs_db_patch=True when flush happened before tool calls arrived"

@@ -548,6 +548,46 @@ async def update_message_content_by_sequence(
         return False
 
 
+async def update_message_tool_calls(
+    session_id: str,
+    sequence: int,
+    tool_calls: list[dict],
+) -> bool:
+    """Patch the toolCalls column of an already-saved assistant message.
+
+    Called when StreamToolInputAvailable arrives after an intermediate flush
+    saved the assistant message with tool_calls=None.  The DB save is
+    append-only (uses get_next_sequence), so the already-persisted row must
+    be updated in-place to reflect the tool_calls that arrived later.
+
+    Args:
+        session_id: The chat session ID.
+        sequence: The 0-based sequence number of the assistant message to patch.
+        tool_calls: The full list of tool call dicts to set on the row.
+
+    Returns:
+        True if the row was found and updated, False otherwise.
+    """
+    try:
+        result = await PrismaChatMessage.prisma().update_many(
+            where={"sessionId": session_id, "sequence": sequence},
+            data={"toolCalls": SafeJson(tool_calls)},
+        )
+        if result == 0:
+            logger.warning(
+                f"update_message_tool_calls: no row found for session {session_id}, "
+                f"sequence {sequence}"
+            )
+            return False
+        return True
+    except Exception as e:
+        logger.error(
+            f"update_message_tool_calls failed for session {session_id}, "
+            f"sequence {sequence}: {e}"
+        )
+        return False
+
+
 async def set_turn_duration(session_id: str, duration_ms: int) -> None:
     """Set durationMs on the last assistant message in a session.
 
