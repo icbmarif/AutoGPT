@@ -15,13 +15,24 @@ export async function GET() {
 export async function PUT(request: Request) {
   try {
     const supabase = await getServerSupabase();
-    const body = await request.json();
-    const { email, full_name } = body as {
-      email?: string;
-      full_name?: string;
+
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+
+    const { email: rawEmail, full_name: rawFullName } = body as {
+      email?: unknown;
+      full_name?: unknown;
     };
 
-    if (!email && !full_name) {
+    const email = typeof rawEmail === "string" ? rawEmail.trim() : undefined;
+    const fullName =
+      typeof rawFullName === "string" ? rawFullName.trim() : undefined;
+
+    if (!email && !fullName) {
       return NextResponse.json(
         { error: "Email or full_name is required" },
         { status: 400 },
@@ -30,7 +41,7 @@ export async function PUT(request: Request) {
 
     const updatePayload: Parameters<typeof supabase.auth.updateUser>[0] = {};
     if (email) updatePayload.email = email;
-    if (full_name) updatePayload.data = { full_name };
+    if (fullName) updatePayload.data = { full_name: fullName };
 
     const { data, error } = await supabase.auth.updateUser(updatePayload);
 
