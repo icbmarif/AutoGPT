@@ -373,11 +373,6 @@ def projects_base() -> str:
     return os.path.realpath(os.path.join(config_dir, "projects"))
 
 
-# Patchable alias used by upload_cli_session (and tests) so the base path
-# can be overridden without monkey-patching the public projects_base function.
-_projects_base = projects_base
-
-
 _STALE_PROJECT_DIR_SECONDS = 12 * 3600  # 12 hours — matches max session lifetime
 _MAX_PROJECT_DIRS_TO_SWEEP = 50  # limit per sweep to avoid long pauses
 
@@ -741,91 +736,6 @@ async def upload_transcript(
         message_count,
         mode,
     )
-
-
-async def upload_cli_session(
-    user_id: str,
-    session_id: str,
-    sdk_cwd: str,
-    message_count: int = 0,
-    mode: TranscriptMode = "sdk",
-    log_prefix: str = "[Transcript]",
-) -> None:
-    """Read the CLI session from disk, strip bloat, write back, and upload to GCS.
-
-    Combines disk I/O (read + strip + write-back) with the GCS upload so that
-    callers in the Stop-hook path have a single awaitable.
-
-    Uses ``_projects_base`` (patchable alias of ``projects_base``) so tests can
-    redirect to a temporary directory without affecting the public API.
-    """
-    pbase = _projects_base()
-    encoded_cwd = re.sub(r"[^a-zA-Z0-9]", "-", os.path.realpath(sdk_cwd))
-    session_file = Path(pbase) / encoded_cwd / f"{_sanitize_id(session_id)}.jsonl"
-
-    real_path = os.path.realpath(str(session_file))
-    if not real_path.startswith(pbase + os.sep):
-        logger.warning(
-            "%s CLI session file outside projects base, skipping upload: %s",
-            log_prefix,
-            os.path.basename(real_path),
-        )
-        return
-
-    try:
-        raw_bytes = Path(real_path).read_bytes()
-    except FileNotFoundError:
-        logger.debug(
-            "%s CLI session file not found, skipping upload: %s",
-            log_prefix,
-            os.path.basename(real_path),
-        )
-        return
-    except OSError as e:
-        logger.warning(
-            "%s Failed to read CLI session file %s: %s",
-            log_prefix,
-            os.path.basename(real_path),
-            e.strerror or str(e),
-        )
-        return
-
-    try:
-        raw_text = raw_bytes.decode("utf-8")
-        stripped_text = strip_for_upload(raw_text)
-        stripped_bytes = stripped_text.encode("utf-8")
-    except UnicodeDecodeError:
-        logger.warning("%s CLI session is not valid UTF-8, uploading raw", log_prefix)
-        stripped_bytes = raw_bytes
-    except (OSError, ValueError) as e:
-        logger.warning(
-            "%s Failed to strip CLI session, uploading raw: %s", log_prefix, e
-        )
-        stripped_bytes = raw_bytes
-
-    if len(stripped_bytes) < len(raw_bytes):
-        try:
-            Path(real_path).write_bytes(stripped_bytes)
-        except OSError as e:
-            logger.warning(
-                "%s Failed to write back stripped CLI session: %s",
-                log_prefix,
-                e.strerror or str(e),
-            )
-
-    storage = await get_workspace_storage()
-    wid, fid, fname = _cli_session_storage_path_parts(user_id, session_id)
-    try:
-        await storage.store(
-            workspace_id=wid, file_id=fid, filename=fname, content=stripped_bytes
-        )
-    except Exception as upload_err:
-        logger.warning(
-            "%s Failed to upload CLI session file: %s", log_prefix, upload_err
-        )
-        return
-
-    logger.info("%s Uploaded CLI session (%dB)", log_prefix, len(stripped_bytes))
 
 
 async def download_transcript(
