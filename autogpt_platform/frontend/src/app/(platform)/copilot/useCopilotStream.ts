@@ -132,14 +132,14 @@ export function useCopilotStream({
   const reconnectStartedAtRef = useRef<number | null>(null);
   // Timer for the forced reconnect timeout.
   const reconnectTimeoutTimerRef = useRef<ReturnType<typeof setTimeout>>();
-  // Set when reconnecting has timed out (>30s).
-  const [reconnectTimedOut, setReconnectTimedOut] = useState(false);
 
   function handleReconnect(sid: string) {
     if (isReconnectScheduledRef.current || !sid) return;
 
     const nextAttempt = reconnectAttemptsRef.current + 1;
     if (nextAttempt > RECONNECT_MAX_ATTEMPTS) {
+      clearTimeout(reconnectTimeoutTimerRef.current);
+      reconnectTimeoutTimerRef.current = undefined;
       setReconnectExhausted(true);
       toast({
         title: "Connection lost",
@@ -155,9 +155,11 @@ export function useCopilotStream({
       // Schedule a forced timeout — if reconnecting takes longer than
       // RECONNECT_MAX_DURATION_MS, force the UI back to idle.
       clearTimeout(reconnectTimeoutTimerRef.current);
+      const capturedEpoch = sessionEpochRef.current;
       reconnectTimeoutTimerRef.current = setTimeout(() => {
+        if (sessionEpochRef.current !== capturedEpoch) return;
+        if (!isReconnectScheduledRef.current) return;
         setReconnectExhausted(true);
-        setReconnectTimedOut(true);
         reconnectStartedAtRef.current = null;
         toast({
           title: "Connection timed out",
@@ -530,7 +532,6 @@ export function useCopilotStream({
     hasShownDisconnectToast.current = false;
     lastSubmittedMsgRef.current = null;
     setReconnectExhausted(false);
-    setReconnectTimedOut(false);
     setIsSyncing(false);
     hasResumedRef.current.clear();
     hydrateCompletedRef.current = false;
@@ -565,7 +566,6 @@ export function useCopilotStream({
         reconnectStartedAtRef.current = null;
         clearTimeout(reconnectTimeoutTimerRef.current);
         reconnectTimeoutTimerRef.current = undefined;
-        setReconnectTimedOut(false);
         // Intentionally NOT clearing lastSubmittedMsgRef here: keeping the last
         // submitted text prevents getSendSuppressionReason from allowing a
         // duplicate POST of the same message immediately after a successful turn
@@ -651,7 +651,6 @@ export function useCopilotStream({
     status,
     error: isReconnecting || isUserStoppingRef.current ? undefined : error,
     isReconnecting,
-    reconnectTimedOut,
     isSyncing,
     isUserStoppingRef,
     rateLimitMessage,
