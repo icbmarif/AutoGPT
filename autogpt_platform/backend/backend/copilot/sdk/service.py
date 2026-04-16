@@ -1406,7 +1406,7 @@ async def _build_query_message(
             "[SDK] [%s] Fallback context empty after compression"
             " (%d messages) — sending message without history",
             session_id[:8],
-            len(prior),
+            len(source),
         )
 
     return current_message, False
@@ -3168,6 +3168,10 @@ async def stream_chat_completion_sdk(
                     system_prompt, cross_user_cache=_cross_user_retry
                 )
                 state.options = ClaudeAgentOptions(**sdk_options_kwargs_retry)  # type: ignore[arg-type]  # dynamic kwargs
+                # Retry intentionally omits prior_messages (transcript+gap context) and
+                # falls back to full session.messages[:-1] from DB — the authoritative
+                # source.  transcript+gap is an optimisation for the first attempt only;
+                # on retry the extra overhead of full-DB context is acceptable.
                 state.query_message, state.was_compacted = await _build_query_message(
                     current_message,
                     session,
