@@ -167,3 +167,7 @@ class LinkTokenExpiredError(ValueError):
 
 class LinkFlowMismatchError(ValueError):
     """A platform_linking token was used for the wrong flow (server vs user)."""
+
+
+class DuplicateChatMessageError(ValueError):
+    """The same user message is already in flight for this chat session."""

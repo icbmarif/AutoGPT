@@ -11,7 +11,7 @@ from backend.copilot.model import (
     create_chat_session,
     get_chat_session,
 )
-from backend.util.exceptions import NotFoundError
+from backend.util.exceptions import DuplicateChatMessageError, NotFoundError
 
 from .links import find_server_link, find_user_link
 from .models import BotChatRequest, ChatTurnHandle
@@ -58,8 +58,6 @@ async def start_chat_turn(request: BotChatRequest) -> ChatTurnHandle:
         session = await create_chat_session(owner_user_id, dry_run=False)
         session_id = session.session_id
 
-    turn_id = str(uuid4())
-
     # Persist the user message before enqueueing, mirroring the REST chat
     # endpoint — otherwise the executor runs against empty history.
     is_duplicate = (
@@ -68,12 +66,18 @@ async def start_chat_turn(request: BotChatRequest) -> ChatTurnHandle:
         )
     ) is None
     if is_duplicate:
+        # Matches REST chat behaviour: skip create_session + enqueue so we
+        # don't create an orphan stream with no producer. Caller subscribes
+        # to the in-flight turn via its own retry logic, or drops.
         logger.info(
-            "Duplicate bot message detected for session %s (platform %s, user ...%s)",
+            "Duplicate bot message for session %s (platform %s, user ...%s)",
             session_id,
             request.platform.value,
             owner_user_id[-8:],
         )
+        raise DuplicateChatMessageError("Message already in flight.")
+
+    turn_id = str(uuid4())
 
     await stream_registry.create_session(
         session_id=session_id,
@@ -83,14 +87,13 @@ async def start_chat_turn(request: BotChatRequest) -> ChatTurnHandle:
         turn_id=turn_id,
     )
 
-    if not is_duplicate:
-        await enqueue_copilot_turn(
-            session_id=session_id,
-            user_id=owner_user_id,
-            message=request.message,
-            turn_id=turn_id,
-            is_user_message=True,
-        )
+    await enqueue_copilot_turn(
+        session_id=session_id,
+        user_id=owner_user_id,
+        message=request.message,
+        turn_id=turn_id,
+        is_user_message=True,
+    )
 
     logger.info(
         "Bot chat turn started: %s (server %s, session %s, turn %s, owner ...%s)",
