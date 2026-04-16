@@ -604,7 +604,9 @@ export function useCopilotStream({
     // Don't resume a stream the user just cancelled
     if (isUserStoppingRef.current) return;
 
+    const capturedEpoch = sessionEpochRef.current;
     function doResume() {
+      if (sessionEpochRef.current !== capturedEpoch) return;
       if (!sessionId || hasResumedRef.current.get(sessionId)) return;
       if (isUserStoppingRef.current) return;
 
