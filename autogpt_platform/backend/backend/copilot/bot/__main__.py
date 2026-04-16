@@ -1,4 +1,4 @@
-"""Entry point for running the CoPilot Bot service.
+"""Entry point for running the CoPilot Chat Bridge service.
 
 Usage:
     poetry run copilot-bot
@@ -7,12 +7,12 @@ Usage:
 
 from backend.app import run_processes
 
-from .app import CoPilotBot
+from .app import CoPilotChatBridge
 
 
 def main():
-    """Run the CoPilot Bot service."""
-    run_processes(CoPilotBot())
+    """Run the CoPilot Chat Bridge service."""
+    run_processes(CoPilotChatBridge())
 
 
 if __name__ == "__main__":

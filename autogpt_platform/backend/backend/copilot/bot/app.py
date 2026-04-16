@@ -1,8 +1,8 @@
-"""CoPilot Bot process entry point.
+"""CoPilot Chat Bridge process entry point.
 
-Constructs the enabled platform adapters (Discord, Telegram, Slack) based on
-which env vars are set, wires them to the shared MessageHandler, and runs
-them all concurrently.
+Runs the enabled chat-platform adapters (Discord, Telegram, Slack) that bridge
+AutoPilot to external chat platforms. Always starts — idles if no platform
+adapters are configured so the service stays resilient across restarts.
 """
 
 import asyncio
@@ -13,22 +13,24 @@ from backend.util.process import AppProcess
 from .adapters.base import PlatformAdapter
 from .adapters.discord import config as discord_config
 from .adapters.discord.adapter import DiscordAdapter
-from .config import validate_shared_config
 from .handler import MessageHandler
 from .platform_api import PlatformAPI
 
 logger = logging.getLogger(__name__)
 
+# Idle when no adapters configured so the process stays up for health checks
+# and future runtime reconfiguration.
+_NO_ADAPTER_SLEEP_SECONDS = 3600
 
-class CoPilotBot(AppProcess):
-    """Runs chat platform adapters and routes messages to AutoPilot."""
+
+class CoPilotChatBridge(AppProcess):
+    """Bridges AutoPilot to external chat platforms via per-platform adapters."""
 
     @property
     def service_name(self) -> str:
-        return "CoPilotBot"
+        return "CoPilotChatBridge"
 
     def run(self) -> None:
-        validate_shared_config()
         asyncio.run(self._run_async())
 
     async def _run_async(self) -> None:
@@ -36,10 +38,16 @@ class CoPilotBot(AppProcess):
         adapters = _build_adapters(api)
 
         if not adapters:
-            raise RuntimeError(
-                "No platform adapters configured. Set AUTOPILOT_BOT_DISCORD_TOKEN "
-                "(or another platform token) to enable at least one adapter."
+            logger.info(
+                "CoPilotChatBridge: no platform adapters configured — idling. "
+                "Set AUTOPILOT_BOT_DISCORD_TOKEN (or another platform token) to "
+                "enable an adapter."
             )
+            try:
+                while True:
+                    await asyncio.sleep(_NO_ADAPTER_SLEEP_SECONDS)
+            finally:
+                await api.close()
 
         handler = MessageHandler(api)
         for adapter in adapters:
@@ -48,9 +56,7 @@ class CoPilotBot(AppProcess):
         try:
             await asyncio.gather(*(a.start() for a in adapters))
         finally:
-            await asyncio.gather(
-                *(a.stop() for a in adapters), return_exceptions=True
-            )
+            await asyncio.gather(*(a.stop() for a in adapters), return_exceptions=True)
             await api.close()
 
 
