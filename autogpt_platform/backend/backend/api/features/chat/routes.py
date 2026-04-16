@@ -902,29 +902,16 @@ async def stream_chat_post(
                 },
             )
 
-    # Atomically append user message to session BEFORE creating task to avoid
-    # race condition where GET_SESSION sees task as "running" but message isn't
-    # saved yet.  append_and_save_message re-fetches inside a lock to prevent
-    # message loss from concurrent requests.
+    # Enqueue the executor task and persist the user message concurrently.
+    # The executor receives the message text via the RabbitMQ payload and
+    # does NOT rely on the DB row being present when it starts —
+    # ``maybe_append_user_message`` in the SDK service handles dedup if the
+    # DB save lands first.  Running both in parallel shaves ~400 ms off the
+    # critical path vs the old sequential save-then-enqueue order.
     #
-    # If any of these operations raises, release the dedup lock before propagating
-    # so subsequent retries are not blocked for 30 s.
+    # If any of these operations raises, release the dedup lock before
+    # propagating so subsequent retries are not blocked for 30 s.
     try:
-        if request.message:
-            message = ChatMessage(
-                role="user" if request.is_user_message else "assistant",
-                content=request.message,
-            )
-            if request.is_user_message:
-                track_user_message(
-                    user_id=user_id,
-                    session_id=session_id,
-                    message_length=len(request.message),
-                )
-            logger.info(f"[STREAM] Saving user message to session {session_id}")
-            await append_and_save_message(session_id, message)
-            logger.info(f"[STREAM] User message saved for session {session_id}")
-
         # Create a task in the stream registry for reconnection support
         turn_id = str(uuid4())
         log_meta["turn_id"] = turn_id
@@ -947,7 +934,22 @@ async def stream_chat_post(
             },
         )
 
-        await enqueue_copilot_turn(
+        # Build the message object for DB persistence (if applicable)
+        save_coro = None
+        if request.message:
+            db_message = ChatMessage(
+                role="user" if request.is_user_message else "assistant",
+                content=request.message,
+            )
+            if request.is_user_message:
+                track_user_message(
+                    user_id=user_id,
+                    session_id=session_id,
+                    message_length=len(request.message),
+                )
+            save_coro = append_and_save_message(session_id, db_message)
+
+        enqueue_coro = enqueue_copilot_turn(
             session_id=session_id,
             user_id=user_id,
             message=request.message,
@@ -958,6 +960,11 @@ async def stream_chat_post(
             mode=request.mode,
             model=request.model,
         )
+
+        if save_coro:
+            await asyncio.gather(save_coro, enqueue_coro)
+        else:
+            await enqueue_coro
     except Exception:
         if dedup_lock:
             await dedup_lock.release()
@@ -1003,6 +1010,11 @@ async def stream_chat_post(
             if subscriber_queue is None:
                 yield StreamFinish().to_sse()
                 return  # finally releases dedup_lock
+
+            # Flush a heartbeat immediately so the client knows the
+            # connection is live — without this the first event arrives
+            # only after the _stream_listener's first xread (up to 5 s).
+            yield StreamHeartbeat().to_sse()
 
             # Read from the subscriber queue and yield to SSE
             logger.info(

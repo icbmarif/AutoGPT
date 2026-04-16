@@ -2743,9 +2743,9 @@ async def stream_chat_completion_sdk(
             )
             return
         # --- Run independent async I/O operations in parallel ---
-        # E2B sandbox setup, system prompt build (Langfuse + DB), and transcript
-        # download are independent network calls.  Running them concurrently
-        # saves ~200-500ms compared to sequential execution.
+        # E2B sandbox setup, system prompt build (Langfuse + DB), Graphiti
+        # warm-context, and CLI session restore are all independent network
+        # calls. Running them concurrently saves ~500-1000ms vs sequential.
 
         async def _setup_e2b():
             """Set up E2B sandbox if configured, return sandbox or None."""
@@ -2776,15 +2776,50 @@ async def stream_chat_completion_sdk(
 
             return sandbox
 
-        e2b_sandbox, (base_system_prompt, understanding) = await asyncio.gather(
+        async def _fetch_graphiti_context() -> tuple[bool, str]:
+            """Check Graphiti flag and fetch warm context in one shot.
+
+            Warm context: pre-load relevant facts from Graphiti on first turn.
+            Stored here and injected into the first user message (not the
+            system prompt) so the system prompt stays identical across all
+            users and sessions, enabling cross-session Anthropic prompt-cache
+            hits.
+            """
+            enabled = await is_enabled_for_user(user_id)
+            if not enabled:
+                return False, ""
+            if not (user_id and len(session.messages) <= 1):
+                return True, ""
+
+            from ..graphiti.context import fetch_warm_context
+
+            ctx = await fetch_warm_context(user_id, message or "") or ""
+            return True, ctx
+
+        (
+            e2b_sandbox,
+            (base_system_prompt, understanding),
+            (graphiti_enabled, warm_ctx),
+            _restore,
+        ) = await asyncio.gather(
             _setup_e2b(),
             _build_system_prompt(user_id if not has_history else None),
+            _fetch_graphiti_context(),
+            # Restore CLI session — single GCS round-trip covers both
+            # --resume and builder state.  message_count watermark lives
+            # in the companion .meta.json alongside the session file.
+            _restore_cli_session_for_turn(
+                user_id,
+                session_id,
+                session,
+                sdk_cwd,
+                transcript_builder,
+                log_prefix,
+            ),
         )
 
         use_e2b = e2b_sandbox is not None
         # Append appropriate supplement (Claude gets tool schemas automatically)
-
-        graphiti_enabled = await is_enabled_for_user(user_id)
 
         graphiti_supplement = get_graphiti_supplement() if graphiti_enabled else ""
         system_prompt = (
@@ -2793,21 +2828,6 @@ async def stream_chat_completion_sdk(
             + graphiti_supplement
         )
 
-        # Warm context: pre-load relevant facts from Graphiti on first turn.
-        # Stored here and injected into the first user message (not the system
-        # prompt) so the system prompt stays identical across all users and
-        # sessions, enabling cross-session Anthropic prompt-cache hits.
-        warm_ctx = ""
-        if graphiti_enabled and user_id and len(session.messages) <= 1:
-            from ..graphiti.context import fetch_warm_context
-
-            warm_ctx = await fetch_warm_context(user_id, message or "") or ""
-
-        # Restore CLI session — single GCS round-trip covers both --resume and builder state.
-        # message_count watermark lives in the companion .meta.json alongside the session file.
-        _restore = await _restore_cli_session_for_turn(
-            user_id, session_id, session, sdk_cwd, transcript_builder, log_prefix
-        )
         transcript_content = _restore.transcript_content
         transcript_covers_prefix = _restore.transcript_covers_prefix
         use_resume = _restore.use_resume
