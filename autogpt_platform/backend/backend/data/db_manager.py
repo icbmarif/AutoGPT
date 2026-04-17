@@ -97,7 +97,6 @@ from backend.data.notifications import (
 )
 from backend.data.onboarding import increment_onboarding_runs
 from backend.data.platform_cost import log_platform_cost
-from backend.platform_linking import db as platform_linking_db
 from backend.data.understanding import (
     get_business_understanding,
     upsert_business_understanding,
@@ -120,6 +119,7 @@ from backend.data.workspace import (
     list_workspace_files,
     soft_delete_workspace_file,
 )
+from backend.platform_linking import db as platform_linking_db
 from backend.util.service import (
     AppService,
     AppServiceClient,
