@@ -190,6 +190,10 @@ export function useCopilotStream({
 
       isReconnectScheduledRef.current = false;
       setIsReconnectScheduled(false);
+      // Mark this session as resumed so a deferred page-load resume
+      // (queued in pendingResumeRef while hydration was in-flight) can't
+      // double-fire resumeStream() once hydration completes.
+      hasResumedRef.current.set(sid, true);
       // Strip the stale in-progress assistant message before resuming —
       // the backend replays from "0-0", so keeping it would duplicate parts.
       setMessages((prev) => {
