@@ -11,9 +11,9 @@ from backend.copilot.model import (
     create_chat_session,
     get_chat_session,
 )
+from backend.data.db_accessors import platform_linking_db
 from backend.util.exceptions import DuplicateChatMessageError, NotFoundError
 
-from .links import find_server_link, find_user_link
 from .models import BotChatRequest, ChatTurnHandle
 
 logger = logging.getLogger(__name__)
@@ -28,17 +28,18 @@ async def resolve_chat_owner(request: BotChatRequest) -> str:
     Server context → server owner. DM context → the DM-linked user.
     """
     platform = request.platform.value
+    db = platform_linking_db()
 
     if request.platform_server_id:
-        link = await find_server_link(platform, request.platform_server_id)
-        if link is None:
+        owner = await db.find_server_link_owner(platform, request.platform_server_id)
+        if owner is None:
             raise NotFoundError("This server is not linked to an AutoGPT account.")
-        return link.userId
+        return owner
 
-    user_link = await find_user_link(platform, request.platform_user_id)
-    if user_link is None:
+    owner = await db.find_user_link_owner(platform, request.platform_user_id)
+    if owner is None:
         raise NotFoundError("Your DMs are not linked to an AutoGPT account.")
-    return user_link.userId
+    return owner
 
 
 async def start_chat_turn(request: BotChatRequest) -> ChatTurnHandle:

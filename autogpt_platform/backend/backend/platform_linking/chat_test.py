@@ -23,9 +23,11 @@ def _request(**overrides) -> BotChatRequest:
 class TestStartChatTurn:
     @pytest.mark.asyncio
     async def test_no_user_link_raises_not_found(self):
+        db_mock = MagicMock()
+        db_mock.find_user_link_owner = AsyncMock(return_value=None)
         with patch(
-            "backend.platform_linking.chat.find_user_link",
-            new=AsyncMock(return_value=None),
+            "backend.platform_linking.chat.platform_linking_db",
+            return_value=db_mock,
         ):
             with pytest.raises(NotFoundError):
                 await start_chat_turn(_request())
@@ -33,15 +35,15 @@ class TestStartChatTurn:
     @pytest.mark.asyncio
     async def test_duplicate_message_raises_and_skips_stream_create(self):
         # append_and_save_message returns None → duplicate.
-        # Verify we raise and do NOT create a stream session (Sentry-reported
-        # bug: an orphan stream with no producer makes subscribers hang).
-        user_link = MagicMock(userId="owner-1")
+        # Verify we raise and do NOT create a stream session.
+        db_mock = MagicMock()
+        db_mock.find_user_link_owner = AsyncMock(return_value="owner-1")
         session = MagicMock(session_id="sess-existing")
 
         with (
             patch(
-                "backend.platform_linking.chat.find_user_link",
-                new=AsyncMock(return_value=user_link),
+                "backend.platform_linking.chat.platform_linking_db",
+                return_value=db_mock,
             ),
             patch(
                 "backend.platform_linking.chat.create_chat_session",
@@ -69,13 +71,14 @@ class TestStartChatTurn:
 
     @pytest.mark.asyncio
     async def test_happy_path_creates_stream_and_enqueues(self):
-        user_link = MagicMock(userId="owner-1")
+        db_mock = MagicMock()
+        db_mock.find_user_link_owner = AsyncMock(return_value="owner-1")
         session = MagicMock(session_id="sess-new")
 
         with (
             patch(
-                "backend.platform_linking.chat.find_user_link",
-                new=AsyncMock(return_value=user_link),
+                "backend.platform_linking.chat.platform_linking_db",
+                return_value=db_mock,
             ),
             patch(
                 "backend.platform_linking.chat.create_chat_session",
@@ -98,22 +101,21 @@ class TestStartChatTurn:
 
         assert handle.session_id == "sess-new"
         assert handle.user_id == "owner-1"
-        assert handle.turn_id  # non-empty uuid
+        assert handle.turn_id
         assert handle.subscribe_from == "0-0"
         mock_stream_registry.create_session.assert_awaited_once()
         mock_enqueue.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_existing_session_id_wrong_user_raises_not_found(self):
-        user_link = MagicMock(userId="owner-1")
+        db_mock = MagicMock()
+        db_mock.find_user_link_owner = AsyncMock(return_value="owner-1")
 
         with (
             patch(
-                "backend.platform_linking.chat.find_user_link",
-                new=AsyncMock(return_value=user_link),
+                "backend.platform_linking.chat.platform_linking_db",
+                return_value=db_mock,
             ),
-            # get_chat_session returns None when the caller doesn't own the
-            # session — emulate that here.
             patch(
                 "backend.platform_linking.chat.get_chat_session",
                 new=AsyncMock(return_value=None),

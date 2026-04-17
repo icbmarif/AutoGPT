@@ -1,4 +1,10 @@
-"""Platform link CRUD helpers."""
+"""Platform link DB operations.
+
+Directly accessed by the ``AgentServer`` / ``DatabaseManager`` pods (which
+hold the Prisma connection). Other services go through
+``backend.data.db_accessors.platform_linking_db`` so calls are transparently
+routed via ``DatabaseManagerAsyncClient`` when no local Prisma is available.
+"""
 
 import logging
 import secrets
@@ -40,23 +46,21 @@ def _link_base_url() -> str:
     return Settings().config.platform_link_base_url
 
 
-# ── Lookups ───────────────────────────────────────────────────────────
+# ── Owner lookups ─────────────────────────────────────────────────────
+# These return the owning AutoGPT user_id (or None). Using scalars instead
+# of Prisma models keeps everything RPC-safe — Prisma objects are rejected
+# by AppService's result validator.
 
 
-async def find_server_link(
-    platform: str,
-    platform_server_id: str,
-) -> PlatformLink | None:
-    return await PlatformLink.prisma().find_first(
+async def find_server_link_owner(platform: str, platform_server_id: str) -> str | None:
+    link = await PlatformLink.prisma().find_first(
         where={"platform": platform, "platformServerId": platform_server_id}
     )
+    return link.userId if link else None
 
 
-async def find_user_link(
-    platform: str,
-    platform_user_id: str,
-) -> PlatformUserLink | None:
-    return await PlatformUserLink.prisma().find_unique(
+async def find_user_link_owner(platform: str, platform_user_id: str) -> str | None:
+    link = await PlatformUserLink.prisma().find_unique(
         where={
             "platform_platformUserId": {
                 "platform": platform,
@@ -64,18 +68,19 @@ async def find_user_link(
             }
         }
     )
+    return link.userId if link else None
 
 
 async def resolve_server_link(
     platform: str, platform_server_id: str
 ) -> ResolveResponse:
-    link = await find_server_link(platform, platform_server_id)
-    return ResolveResponse(linked=link is not None)
+    owner = await find_server_link_owner(platform, platform_server_id)
+    return ResolveResponse(linked=owner is not None)
 
 
 async def resolve_user_link(platform: str, platform_user_id: str) -> ResolveResponse:
-    link = await find_user_link(platform, platform_user_id)
-    return ResolveResponse(linked=link is not None)
+    owner = await find_user_link_owner(platform, platform_user_id)
+    return ResolveResponse(linked=owner is not None)
 
 
 # ── Token creation ────────────────────────────────────────────────────
@@ -86,8 +91,7 @@ async def create_server_link_token(
 ) -> LinkTokenResponse:
     platform = request.platform.value
 
-    existing = await find_server_link(platform, request.platform_server_id)
-    if existing:
+    if await find_server_link_owner(platform, request.platform_server_id):
         raise LinkAlreadyExistsError(
             "This server is already linked to an AutoGPT account."
         )
@@ -97,8 +101,8 @@ async def create_server_link_token(
         minutes=LINK_TOKEN_EXPIRY_MINUTES
     )
 
-    # Atomically invalidate pending tokens and create the new one — guards
-    # against TOCTOU when two creates race back-to-back.
+    # Atomic: invalidate pending tokens + create the new one, so two racing
+    # create calls can't leave two valid tokens for the same target.
     async with transaction() as tx:
         await PlatformLinkToken.prisma(tx).update_many(
             where={
@@ -109,7 +113,6 @@ async def create_server_link_token(
             },
             data={"usedAt": datetime.now(timezone.utc)},
         )
-
         await PlatformLinkToken.prisma(tx).create(
             data={
                 "token": token,
@@ -143,8 +146,7 @@ async def create_user_link_token(
 ) -> LinkTokenResponse:
     platform = request.platform.value
 
-    existing = await find_user_link(platform, request.platform_user_id)
-    if existing:
+    if await find_user_link_owner(platform, request.platform_user_id):
         raise LinkAlreadyExistsError(
             "Your DMs with the bot are already linked to an AutoGPT account."
         )
@@ -164,7 +166,6 @@ async def create_user_link_token(
             },
             data={"usedAt": datetime.now(timezone.utc)},
         )
-
         await PlatformLinkToken.prisma(tx).create(
             data={
                 "token": token,
@@ -200,16 +201,18 @@ async def get_link_token_status(token: str) -> LinkTokenStatusResponse:
         # A superseded token (invalidated by create_*_token) has usedAt set
         # without a backing link row — report expired, not linked.
         if link_token.linkType == LinkType.USER.value:
-            actual = await find_user_link(
+            owner = await find_user_link_owner(
                 link_token.platform, link_token.platformUserId
             )
         else:
-            actual = (
-                await find_server_link(link_token.platform, link_token.platformServerId)
+            owner = (
+                await find_server_link_owner(
+                    link_token.platform, link_token.platformServerId
+                )
                 if link_token.platformServerId
                 else None
             )
-        return LinkTokenStatusResponse(status="linked" if actual else "expired")
+        return LinkTokenStatusResponse(status="linked" if owner else "expired")
 
     if link_token.expiresAt.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         return LinkTokenStatusResponse(status="expired")
@@ -241,24 +244,22 @@ async def confirm_server_link(token: str, user_id: str) -> ConfirmLinkResponse:
 
     if not link_token:
         raise NotFoundError("Token not found.")
-
     if link_token.linkType != LinkType.SERVER.value:
         raise LinkFlowMismatchError("This link is for a different linking flow.")
-
     if link_token.usedAt is not None:
         raise LinkTokenExpiredError("This link has already been used.")
-
     if link_token.expiresAt.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         raise LinkTokenExpiredError("This link has expired.")
-
     if not link_token.platformServerId:
         raise LinkFlowMismatchError("Server token missing server ID.")
 
-    existing = await find_server_link(link_token.platform, link_token.platformServerId)
-    if existing:
+    owner = await find_server_link_owner(
+        link_token.platform, link_token.platformServerId
+    )
+    if owner:
         detail = (
             "This server is already linked to your account."
-            if existing.userId == user_id
+            if owner == user_id
             else "This server is already linked to another AutoGPT account."
         )
         raise LinkAlreadyExistsError(detail)
@@ -273,7 +274,6 @@ async def confirm_server_link(token: str, user_id: str) -> ConfirmLinkResponse:
             )
             if updated == 0:
                 raise LinkTokenExpiredError("This link has already been used.")
-
             await PlatformLink.prisma(tx).create(
                 data={
                     "userId": user_id,
@@ -312,21 +312,18 @@ async def confirm_user_link(token: str, user_id: str) -> ConfirmUserLinkResponse
 
     if not link_token:
         raise NotFoundError("Token not found.")
-
     if link_token.linkType != LinkType.USER.value:
         raise LinkFlowMismatchError("This link is for a different linking flow.")
-
     if link_token.usedAt is not None:
         raise LinkTokenExpiredError("This link has already been used.")
-
     if link_token.expiresAt.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         raise LinkTokenExpiredError("This link has expired.")
 
-    existing = await find_user_link(link_token.platform, link_token.platformUserId)
-    if existing:
+    owner = await find_user_link_owner(link_token.platform, link_token.platformUserId)
+    if owner:
         detail = (
             "Your DMs are already linked to your account."
-            if existing.userId == user_id
+            if owner == user_id
             else "This platform user is already linked to another AutoGPT account."
         )
         raise LinkAlreadyExistsError(detail)
@@ -340,7 +337,6 @@ async def confirm_user_link(token: str, user_id: str) -> ConfirmUserLinkResponse
             )
             if updated == 0:
                 raise LinkTokenExpiredError("This link has already been used.")
-
             await PlatformUserLink.prisma(tx).create(
                 data={
                     "userId": user_id,

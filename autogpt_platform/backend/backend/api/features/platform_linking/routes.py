@@ -6,15 +6,7 @@ from typing import Annotated
 from autogpt_libs import auth
 from fastapi import APIRouter, HTTPException, Path, Security
 
-from backend.platform_linking.links import (
-    confirm_server_link,
-    confirm_user_link,
-    delete_server_link,
-    delete_user_link,
-    get_link_token_info,
-    list_server_links,
-    list_user_links,
-)
+from backend.data.db_accessors import platform_linking_db
 from backend.platform_linking.models import (
     ConfirmLinkResponse,
     ConfirmUserLinkResponse,
@@ -63,7 +55,7 @@ def _translate(exc: Exception) -> HTTPException:
 )
 async def get_link_token_info_route(token: TokenPath) -> LinkTokenInfoResponse:
     try:
-        return await get_link_token_info(token)
+        return await platform_linking_db().get_link_token_info(token)
     except (NotFoundError, LinkTokenExpiredError) as exc:
         raise _translate(exc) from exc
 
@@ -79,7 +71,7 @@ async def confirm_link_token(
     user_id: Annotated[str, Security(auth.get_user_id)],
 ) -> ConfirmLinkResponse:
     try:
-        return await confirm_server_link(token, user_id)
+        return await platform_linking_db().confirm_server_link(token, user_id)
     except (
         NotFoundError,
         LinkFlowMismatchError,
@@ -100,7 +92,7 @@ async def confirm_user_link_token(
     user_id: Annotated[str, Security(auth.get_user_id)],
 ) -> ConfirmUserLinkResponse:
     try:
-        return await confirm_user_link(token, user_id)
+        return await platform_linking_db().confirm_user_link(token, user_id)
     except (
         NotFoundError,
         LinkFlowMismatchError,
@@ -119,7 +111,7 @@ async def confirm_user_link_token(
 async def list_my_links(
     user_id: Annotated[str, Security(auth.get_user_id)],
 ) -> list[PlatformLinkInfo]:
-    return await list_server_links(user_id)
+    return await platform_linking_db().list_server_links(user_id)
 
 
 @router.get(
@@ -131,7 +123,7 @@ async def list_my_links(
 async def list_my_user_links(
     user_id: Annotated[str, Security(auth.get_user_id)],
 ) -> list[PlatformUserLinkInfo]:
-    return await list_user_links(user_id)
+    return await platform_linking_db().list_user_links(user_id)
 
 
 @router.delete(
@@ -145,7 +137,7 @@ async def delete_link(
     user_id: Annotated[str, Security(auth.get_user_id)],
 ) -> DeleteLinkResponse:
     try:
-        return await delete_server_link(link_id, user_id)
+        return await platform_linking_db().delete_server_link(link_id, user_id)
     except (NotFoundError, NotAuthorizedError) as exc:
         raise _translate(exc) from exc
 
@@ -161,6 +153,6 @@ async def delete_user_link_route(
     user_id: Annotated[str, Security(auth.get_user_id)],
 ) -> DeleteLinkResponse:
     try:
-        return await delete_user_link(link_id, user_id)
+        return await platform_linking_db().delete_user_link(link_id, user_id)
     except (NotFoundError, NotAuthorizedError) as exc:
         raise _translate(exc) from exc

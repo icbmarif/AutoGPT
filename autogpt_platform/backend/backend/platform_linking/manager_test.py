@@ -9,7 +9,7 @@ import pytest
 
 from backend.util.exceptions import LinkTokenExpiredError
 
-from .links import confirm_server_link, confirm_user_link
+from .db import confirm_server_link, confirm_user_link
 from .manager import PlatformLinkingManager, PlatformLinkingManagerClient
 from .models import (
     BotChatRequest,
@@ -34,7 +34,6 @@ class TestManagerWiring:
         service_type = PlatformLinkingManagerClient.get_service_type()
         assert service_type is PlatformLinkingManager
 
-        # Cross-check all expected @expose methods land on the client.
         expected = {
             "resolve_server_link",
             "resolve_user_link",
@@ -48,7 +47,6 @@ class TestManagerWiring:
                 PlatformLinkingManagerClient, name
             ), f"Client missing RPC stub: {name}"
 
-        # User-facing confirm/list/delete must stay out of the bot surface.
         for name in (
             "confirm_server_link",
             "confirm_user_link",
@@ -62,25 +60,33 @@ class TestManagerWiring:
             ), f"User-facing method leaked to bot client: {name}"
 
     @pytest.mark.asyncio
-    async def test_resolve_server_link_delegates(self):
+    async def test_resolve_server_link_delegates_to_accessor(self):
         manager = PlatformLinkingManager()
+        db_mock = MagicMock()
+        db_mock.resolve_server_link = AsyncMock(
+            return_value=ResolveResponse(linked=True)
+        )
         with patch(
-            "backend.platform_linking.manager.resolve_server_link",
-            new=AsyncMock(return_value=ResolveResponse(linked=True)),
-        ) as stub:
+            "backend.platform_linking.manager.platform_linking_db",
+            return_value=db_mock,
+        ):
             result = await manager.resolve_server_link(Platform.DISCORD, "g1")
-        stub.assert_awaited_once_with("DISCORD", "g1")
+        db_mock.resolve_server_link.assert_awaited_once_with("DISCORD", "g1")
         assert result.linked is True
 
     @pytest.mark.asyncio
-    async def test_resolve_user_link_delegates(self):
+    async def test_resolve_user_link_delegates_to_accessor(self):
         manager = PlatformLinkingManager()
+        db_mock = MagicMock()
+        db_mock.resolve_user_link = AsyncMock(
+            return_value=ResolveResponse(linked=False)
+        )
         with patch(
-            "backend.platform_linking.manager.resolve_user_link",
-            new=AsyncMock(return_value=ResolveResponse(linked=False)),
-        ) as stub:
-            result = await manager.resolve_user_link(Platform.DISCORD, "u1")
-        stub.assert_awaited_once_with("DISCORD", "u1")
+            "backend.platform_linking.manager.platform_linking_db",
+            return_value=db_mock,
+        ):
+            result = await manager.resolve_user_link(Platform.DISCORD, "pu1")
+        db_mock.resolve_user_link.assert_awaited_once_with("DISCORD", "pu1")
         assert result.linked is False
 
     @pytest.mark.asyncio
@@ -92,39 +98,45 @@ class TestManagerWiring:
             platform_user_id="u1",
         )
         fake_response = MagicMock()
+        db_mock = MagicMock()
+        db_mock.create_server_link_token = AsyncMock(return_value=fake_response)
         with patch(
-            "backend.platform_linking.manager.create_server_link_token",
-            new=AsyncMock(return_value=fake_response),
-        ) as stub:
+            "backend.platform_linking.manager.platform_linking_db",
+            return_value=db_mock,
+        ):
             result = await manager.create_server_link_token(req)
-        stub.assert_awaited_once_with(req)
+        db_mock.create_server_link_token.assert_awaited_once_with(req)
         assert result is fake_response
 
     @pytest.mark.asyncio
     async def test_create_user_link_token_delegates(self):
         manager = PlatformLinkingManager()
         req = CreateUserLinkTokenRequest(
-            platform=Platform.DISCORD, platform_user_id="u1"
+            platform=Platform.DISCORD, platform_user_id="pu1"
         )
         fake_response = MagicMock()
+        db_mock = MagicMock()
+        db_mock.create_user_link_token = AsyncMock(return_value=fake_response)
         with patch(
-            "backend.platform_linking.manager.create_user_link_token",
-            new=AsyncMock(return_value=fake_response),
-        ) as stub:
+            "backend.platform_linking.manager.platform_linking_db",
+            return_value=db_mock,
+        ):
             result = await manager.create_user_link_token(req)
-        stub.assert_awaited_once_with(req)
+        db_mock.create_user_link_token.assert_awaited_once_with(req)
         assert result is fake_response
 
     @pytest.mark.asyncio
     async def test_get_link_token_status_delegates(self):
         manager = PlatformLinkingManager()
         fake_response = MagicMock()
+        db_mock = MagicMock()
+        db_mock.get_link_token_status = AsyncMock(return_value=fake_response)
         with patch(
-            "backend.platform_linking.manager.get_link_token_status",
-            new=AsyncMock(return_value=fake_response),
-        ) as stub:
+            "backend.platform_linking.manager.platform_linking_db",
+            return_value=db_mock,
+        ):
             result = await manager.get_link_token_status("tok")
-        stub.assert_awaited_once_with("tok")
+        db_mock.get_link_token_status.assert_awaited_once_with("tok")
         assert result is fake_response
 
     @pytest.mark.asyncio
@@ -132,7 +144,7 @@ class TestManagerWiring:
         manager = PlatformLinkingManager()
         req = BotChatRequest(
             platform=Platform.DISCORD,
-            platform_user_id="u1",
+            platform_user_id="pu1",
             message="hi",
         )
         fake_response = MagicMock()
@@ -161,22 +173,15 @@ class TestAdversarialConfirmRace:
         )
 
         with (
-            patch(
-                "backend.platform_linking.links.PlatformLinkToken"
-            ) as mock_token_model,
-            patch(
-                "backend.platform_linking.links.find_server_link",
-                new=AsyncMock(return_value=None),
-            ),
-            patch(
-                "backend.platform_linking.links.transaction",
-                new=_fake_transaction,
-            ),
+            patch("backend.platform_linking.db.PlatformLinkToken") as mock_token,
+            patch("backend.platform_linking.db.PlatformLink") as mock_link,
+            patch("backend.platform_linking.db.transaction", new=_fake_transaction),
         ):
-            mock_token_model.prisma.return_value.find_unique = AsyncMock(
+            mock_token.prisma.return_value.find_unique = AsyncMock(
                 return_value=fake_token
             )
-            mock_token_model.prisma.return_value.update_many = AsyncMock(return_value=0)
+            mock_link.prisma.return_value.find_first = AsyncMock(return_value=None)
+            mock_token.prisma.return_value.update_many = AsyncMock(return_value=0)
 
             with pytest.raises(LinkTokenExpiredError):
                 await confirm_server_link("abc", "user-late")
@@ -194,26 +199,16 @@ class TestAdversarialConfirmRace:
         )
 
         with (
-            patch(
-                "backend.platform_linking.links.PlatformLinkToken"
-            ) as mock_token_model,
-            patch("backend.platform_linking.links.PlatformLink") as mock_link_model,
-            patch(
-                "backend.platform_linking.links.find_server_link",
-                new=AsyncMock(return_value=None),
-            ),
-            patch(
-                "backend.platform_linking.links.transaction",
-                new=_fake_transaction,
-            ),
+            patch("backend.platform_linking.db.PlatformLinkToken") as mock_token,
+            patch("backend.platform_linking.db.PlatformLink") as mock_link,
+            patch("backend.platform_linking.db.transaction", new=_fake_transaction),
         ):
-            mock_token_model.prisma.return_value.find_unique = AsyncMock(
+            mock_token.prisma.return_value.find_unique = AsyncMock(
                 return_value=fake_token
             )
-            mock_token_model.prisma.return_value.update_many = AsyncMock(return_value=1)
-            mock_link_model.prisma.return_value.create = AsyncMock(
-                return_value=MagicMock()
-            )
+            mock_link.prisma.return_value.find_first = AsyncMock(return_value=None)
+            mock_token.prisma.return_value.update_many = AsyncMock(return_value=1)
+            mock_link.prisma.return_value.create = AsyncMock(return_value=MagicMock())
 
             result = await confirm_server_link("abc", "user-winner")
 
@@ -222,8 +217,6 @@ class TestAdversarialConfirmRace:
 
     @pytest.mark.asyncio
     async def test_gather_confirm_same_user_one_winner(self):
-        # Two parallel confirms from the *same* user: first update_many wins
-        # (returns 1), second returns 0 and raises LinkTokenExpiredError.
         fake_token = MagicMock(
             linkType=LinkType.SERVER.value,
             usedAt=None,
@@ -233,33 +226,22 @@ class TestAdversarialConfirmRace:
             platformUserId="pu1",
             serverName="S1",
         )
-
         update_results = [1, 0]
 
         async def flaky_update_many(*args, **kwargs):
             return update_results.pop(0)
 
         with (
-            patch(
-                "backend.platform_linking.links.PlatformLinkToken"
-            ) as mock_token_model,
-            patch("backend.platform_linking.links.PlatformLink") as mock_link_model,
-            patch(
-                "backend.platform_linking.links.find_server_link",
-                new=AsyncMock(return_value=None),
-            ),
-            patch(
-                "backend.platform_linking.links.transaction",
-                new=_fake_transaction,
-            ),
+            patch("backend.platform_linking.db.PlatformLinkToken") as mock_token,
+            patch("backend.platform_linking.db.PlatformLink") as mock_link,
+            patch("backend.platform_linking.db.transaction", new=_fake_transaction),
         ):
-            mock_token_model.prisma.return_value.find_unique = AsyncMock(
+            mock_token.prisma.return_value.find_unique = AsyncMock(
                 return_value=fake_token
             )
-            mock_token_model.prisma.return_value.update_many = flaky_update_many
-            mock_link_model.prisma.return_value.create = AsyncMock(
-                return_value=MagicMock()
-            )
+            mock_link.prisma.return_value.find_first = AsyncMock(return_value=None)
+            mock_token.prisma.return_value.update_many = flaky_update_many
+            mock_link.prisma.return_value.create = AsyncMock(return_value=MagicMock())
 
             results = await asyncio.gather(
                 confirm_server_link("abc", "u1"),
@@ -285,7 +267,6 @@ class TestAdversarialConfirmRace:
             platformUserId="pu1",
             serverName="S1",
         )
-
         update_results = [1, 0]
 
         async def flaky_update_many(*args, **kwargs):
@@ -298,24 +279,16 @@ class TestAdversarialConfirmRace:
             return MagicMock()
 
         with (
-            patch(
-                "backend.platform_linking.links.PlatformLinkToken"
-            ) as mock_token_model,
-            patch("backend.platform_linking.links.PlatformLink") as mock_link_model,
-            patch(
-                "backend.platform_linking.links.find_server_link",
-                new=AsyncMock(return_value=None),
-            ),
-            patch(
-                "backend.platform_linking.links.transaction",
-                new=_fake_transaction,
-            ),
+            patch("backend.platform_linking.db.PlatformLinkToken") as mock_token,
+            patch("backend.platform_linking.db.PlatformLink") as mock_link,
+            patch("backend.platform_linking.db.transaction", new=_fake_transaction),
         ):
-            mock_token_model.prisma.return_value.find_unique = AsyncMock(
+            mock_token.prisma.return_value.find_unique = AsyncMock(
                 return_value=fake_token
             )
-            mock_token_model.prisma.return_value.update_many = flaky_update_many
-            mock_link_model.prisma.return_value.create = record_create
+            mock_link.prisma.return_value.find_first = AsyncMock(return_value=None)
+            mock_token.prisma.return_value.update_many = flaky_update_many
+            mock_link.prisma.return_value.create = record_create
 
             results = await asyncio.gather(
                 confirm_server_link("abc", "user-a"),
@@ -327,13 +300,11 @@ class TestAdversarialConfirmRace:
         losses = [r for r in results if isinstance(r, LinkTokenExpiredError)]
         assert len(successes) == 1
         assert len(losses) == 1
-        # Only one PlatformLink.create happened — no hijack / double-claim.
         assert len(created_link_user_ids) == 1
         assert created_link_user_ids[0] in ("user-a", "user-b")
 
     @pytest.mark.asyncio
     async def test_gather_confirm_user_link_one_winner(self):
-        # Same race as above but on the USER-link flow.
         fake_token = MagicMock(
             linkType=LinkType.USER.value,
             usedAt=None,
@@ -342,33 +313,24 @@ class TestAdversarialConfirmRace:
             platformUserId="pu1",
             platformUsername="pu_name",
         )
-
         update_results = [1, 0]
 
         async def flaky_update_many(*args, **kwargs):
             return update_results.pop(0)
 
         with (
-            patch(
-                "backend.platform_linking.links.PlatformLinkToken"
-            ) as mock_token_model,
-            patch(
-                "backend.platform_linking.links.PlatformUserLink"
-            ) as mock_user_link_model,
-            patch(
-                "backend.platform_linking.links.find_user_link",
-                new=AsyncMock(return_value=None),
-            ),
-            patch(
-                "backend.platform_linking.links.transaction",
-                new=_fake_transaction,
-            ),
+            patch("backend.platform_linking.db.PlatformLinkToken") as mock_token,
+            patch("backend.platform_linking.db.PlatformUserLink") as mock_user_link,
+            patch("backend.platform_linking.db.transaction", new=_fake_transaction),
         ):
-            mock_token_model.prisma.return_value.find_unique = AsyncMock(
+            mock_token.prisma.return_value.find_unique = AsyncMock(
                 return_value=fake_token
             )
-            mock_token_model.prisma.return_value.update_many = flaky_update_many
-            mock_user_link_model.prisma.return_value.create = AsyncMock(
+            mock_user_link.prisma.return_value.find_unique = AsyncMock(
+                return_value=None
+            )
+            mock_token.prisma.return_value.update_many = flaky_update_many
+            mock_user_link.prisma.return_value.create = AsyncMock(
                 return_value=MagicMock()
             )
 

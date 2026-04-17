@@ -2,17 +2,11 @@
 
 import logging
 
+from backend.data.db_accessors import platform_linking_db
 from backend.util.service import AppService, AppServiceClient, endpoint_to_async, expose
 from backend.util.settings import Settings
 
 from .chat import start_chat_turn
-from .links import (
-    create_server_link_token,
-    create_user_link_token,
-    get_link_token_status,
-    resolve_server_link,
-    resolve_user_link,
-)
 from .models import (
     BotChatRequest,
     ChatTurnHandle,
@@ -36,29 +30,33 @@ class PlatformLinkingManager(AppService):
     async def resolve_server_link(
         self, platform: Platform, platform_server_id: str
     ) -> ResolveResponse:
-        return await resolve_server_link(platform.value, platform_server_id)
+        return await platform_linking_db().resolve_server_link(
+            platform.value, platform_server_id
+        )
 
     @expose
     async def resolve_user_link(
         self, platform: Platform, platform_user_id: str
     ) -> ResolveResponse:
-        return await resolve_user_link(platform.value, platform_user_id)
+        return await platform_linking_db().resolve_user_link(
+            platform.value, platform_user_id
+        )
 
     @expose
     async def create_server_link_token(
         self, request: CreateLinkTokenRequest
     ) -> LinkTokenResponse:
-        return await create_server_link_token(request)
+        return await platform_linking_db().create_server_link_token(request)
 
     @expose
     async def create_user_link_token(
         self, request: CreateUserLinkTokenRequest
     ) -> LinkTokenResponse:
-        return await create_user_link_token(request)
+        return await platform_linking_db().create_user_link_token(request)
 
     @expose
     async def get_link_token_status(self, token: str) -> LinkTokenStatusResponse:
-        return await get_link_token_status(token)
+        return await platform_linking_db().get_link_token_status(token)
 
     @expose
     async def start_chat_turn(self, request: BotChatRequest) -> ChatTurnHandle:
