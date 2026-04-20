@@ -186,7 +186,9 @@ async def test_write_file_quota_exceeded_raises_value_error(
             return_value=mock_storage,
         ),
         patch("backend.util.workspace.workspace_db", return_value=mock_db),
-        patch("backend.util.workspace.scan_content_safe", new_callable=AsyncMock),
+        patch(
+            "backend.util.workspace.scan_content_safe", new_callable=AsyncMock
+        ) as mock_scan,
         patch(
             "backend.util.workspace.get_workspace_storage_limit_bytes",
             return_value=250 * 1024 * 1024,  # 250 MB limit
@@ -199,6 +201,8 @@ async def test_write_file_quota_exceeded_raises_value_error(
         with pytest.raises(ValueError, match="Storage limit exceeded"):
             await manager.write_file(filename="test.txt", content=b"hello")
 
+    # Quota rejection should short-circuit before expensive virus scan
+    mock_scan.assert_not_called()
     # Storage should NOT have been written to
     mock_storage.store.assert_not_called()
 

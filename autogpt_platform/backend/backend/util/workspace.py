@@ -210,13 +210,13 @@ class WorkspaceManager:
                 current_usage = max(0, current_usage - existing.size_bytes)
 
         projected_usage = current_usage + len(content)
-        if projected_usage > storage_limit:
+        if storage_limit > 0 and projected_usage > storage_limit:
             used_pct = (current_usage / storage_limit) * 100
             raise ValueError(
                 f"Storage limit exceeded: {current_usage:,} bytes used "
                 f"of {storage_limit:,} bytes ({used_pct:.1f}%)"
             )
-        if projected_usage / storage_limit >= 0.8:
+        if storage_limit > 0 and projected_usage / storage_limit >= 0.8:
             logger.warning(
                 f"User {self.user_id} workspace storage at "
                 f"{projected_usage / storage_limit * 100:.1f}% "
