@@ -13,6 +13,7 @@ import OnboardingProvider from "@/providers/onboarding/onboarding-provider";
 import { server } from "@/mocks/mock-server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { NuqsTestingAdapter } from "nuqs/adapters/testing";
 import { ReactNode } from "react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
@@ -324,5 +325,61 @@ describe("Library agent view — trigger agents", () => {
     // And NOT the recurrence/next-run labels
     expect(screen.queryByText("Recurrence")).toBeNull();
     expect(screen.queryByText("Next run")).toBeNull();
+  });
+
+  test("sidebar dropdown Remove deletes the trigger via the shared delete flow", async () => {
+    const user = userEvent.setup();
+    const triggerAgent = getGetV2GetLibraryAgentResponseMock({
+      id: TRIGGER_ID,
+      graph_id: TRIGGER_GRAPH_ID,
+      name: "Dropdown Victim",
+      is_hidden: true,
+    });
+
+    const deleteCalls: string[] = [];
+    server.use(
+      ...baseHandlers(),
+      emptyPresetsHandler,
+      emptySchedulesHandler,
+      getGetV2ListTriggerAgentsMockHandler([triggerAgent]),
+      getDeleteV2DeleteLibraryAgentMockHandler(
+        ({ params }: { params: Record<string, string> }) => {
+          deleteCalls.push(String(params.libraryAgentId));
+          return new Response(null, { status: 204 });
+        },
+      ),
+    );
+
+    // Render on Triggers tab WITHOUT activeItem so the sidebar dropdown
+    // is the path under test (not the side panel).
+    renderWithInitialParams(<NewAgentLibraryView />, "activeTab=triggers");
+
+    await screen.findByText("Dropdown Victim");
+
+    // Open the trigger-agent row's dropdown. Other rows may also have
+    // "More actions" buttons (webhook triggers) but we only have one
+    // trigger-agent row, and the agent-trigger dropdown is the only
+    // one rendered here (no webhook presets in this test).
+    const moreButton = await screen.findByRole("button", {
+      name: /more actions/i,
+    });
+    await user.click(moreButton);
+
+    // Click "Remove trigger" menu item
+    const removeMenuItem = await screen.findByRole("menuitem", {
+      name: /remove trigger/i,
+    });
+    await user.click(removeMenuItem);
+
+    // Confirm in the destructive dialog
+    const confirmButton = await screen.findByRole("button", {
+      name: /^remove trigger$/i,
+    });
+    await user.click(confirmButton);
+
+    await waitFor(() => {
+      expect(deleteCalls).toContain(TRIGGER_ID);
+    });
+    expect(deleteCalls).not.toContain(PARENT_ID);
   });
 });
