@@ -8,8 +8,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from backend.copilot import config as cfg_mod
+
 from .service import (
+    _IDLE_TIMEOUT_SECONDS,
+    _build_system_prompt_value,
     _is_sdk_disconnect_error,
+    _normalize_model_name,
     _prepare_file_attachments,
     _resolve_sdk_model,
     _safe_close_sdk_client,
@@ -161,8 +166,8 @@ class TestPromptSupplement:
         from backend.copilot.prompting import get_sdk_supplement
 
         # Test both local and E2B modes
-        local_supplement = get_sdk_supplement(use_e2b=False, cwd="/tmp/test")
-        e2b_supplement = get_sdk_supplement(use_e2b=True, cwd="")
+        local_supplement = get_sdk_supplement(use_e2b=False)
+        e2b_supplement = get_sdk_supplement(use_e2b=True)
 
         # Should NOT have tool list section
         assert "## AVAILABLE TOOLS" not in local_supplement
@@ -172,70 +177,18 @@ class TestPromptSupplement:
         assert "## Tool notes" in local_supplement
         assert "## Tool notes" in e2b_supplement
 
-    def test_baseline_supplement_includes_tool_docs(self):
-        """Baseline mode MUST include tool documentation (direct API needs it)."""
-        from backend.copilot.prompting import get_baseline_supplement
+    def test_baseline_supplement_has_shared_notes_no_tool_list(self):
+        """Baseline now relies on the OpenAI tools array for schemas and only
+        appends SHARED_TOOL_NOTES (workflow rules not present in any schema).
+        The old auto-generated ``## AVAILABLE TOOLS`` list is gone — it was
+        ~4.3K tokens of pure duplication of the tools array."""
+        from backend.copilot.prompting import SHARED_TOOL_NOTES
 
-        supplement = get_baseline_supplement()
-
-        # MUST have tool list section
-        assert "## AVAILABLE TOOLS" in supplement
-
-        # Should NOT have environment-specific notes (SDK-only)
-        assert "## Tool notes" not in supplement
-
-    def test_baseline_supplement_includes_key_tools(self):
-        """Baseline supplement should document all essential tools."""
-        from backend.copilot.prompting import get_baseline_supplement
-        from backend.copilot.tools import TOOL_REGISTRY
-
-        docs = get_baseline_supplement()
-
-        # Core agent workflow tools (always available)
-        assert "`create_agent`" in docs
-        assert "`run_agent`" in docs
-        assert "`find_library_agent`" in docs
-        assert "`edit_agent`" in docs
-
-        # MCP integration (always available)
-        assert "`run_mcp_tool`" in docs
-
-        # Folder management (always available)
-        assert "`create_folder`" in docs
-
-        # Browser tools only if available (Playwright may not be installed in CI)
-        if (
-            TOOL_REGISTRY.get("browser_navigate")
-            and TOOL_REGISTRY["browser_navigate"].is_available
-        ):
-            assert "`browser_navigate`" in docs
-
-    def test_baseline_supplement_includes_workflows(self):
-        """Baseline supplement should include workflow guidance in tool descriptions."""
-        from backend.copilot.prompting import get_baseline_supplement
-
-        docs = get_baseline_supplement()
-
-        # Workflows are now in individual tool descriptions (not separate sections)
-        # Check that key workflow concepts appear in tool descriptions
-        assert "agent_json" in docs or "find_block" in docs
-        assert "run_mcp_tool" in docs
-
-    def test_baseline_supplement_completeness(self):
-        """All available tools from TOOL_REGISTRY should appear in baseline supplement."""
-        from backend.copilot.prompting import get_baseline_supplement
-        from backend.copilot.tools import TOOL_REGISTRY
-
-        docs = get_baseline_supplement()
-
-        # Verify each available registered tool is documented
-        # (matches _generate_tool_documentation which filters by is_available)
-        for tool_name, tool in TOOL_REGISTRY.items():
-            if not tool.is_available:
-                continue
-            assert (
-                f"`{tool_name}`" in docs
-            ), f"Tool '{tool_name}' missing from baseline supplement"
+        assert "## AVAILABLE TOOLS" not in SHARED_TOOL_NOTES
+        # Keep the high-value workflow rules that are NOT in any tool schema.
+        assert "@@agptfile:" in SHARED_TOOL_NOTES
+        assert "Tool Discovery Priority" in SHARED_TOOL_NOTES
+        assert "run_sub_session" in SHARED_TOOL_NOTES
 
     def test_pause_task_scheduled_before_transcript_upload(self):
         """Pause is scheduled as a background task before transcript upload begins.
@@ -278,21 +231,6 @@ class TestPromptSupplement:
         # create_task schedules pause, then upload is awaited — pause runs
         # concurrently during upload's first yield. The ordering guarantee is
         # that create_task is CALLED before upload is AWAITED (see source order).
-
-    def test_baseline_supplement_no_duplicate_tools(self):
-        """No tool should appear multiple times in baseline supplement."""
-        from backend.copilot.prompting import get_baseline_supplement
-        from backend.copilot.tools import TOOL_REGISTRY
-
-        docs = get_baseline_supplement()
-
-        # Count occurrences of each available tool in the entire supplement
-        for tool_name, tool in TOOL_REGISTRY.items():
-            if not tool.is_available:
-                continue
-            # Count how many times this tool appears as a bullet point
-            count = docs.count(f"- **`{tool_name}`**")
-            assert count == 1, f"Tool '{tool_name}' appears {count} times (should be 1)"
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +334,7 @@ _CONFIG_ENV_VARS = (
     "OPENAI_BASE_URL",
     "CHAT_USE_CLAUDE_CODE_SUBSCRIPTION",
     "CHAT_USE_CLAUDE_AGENT_SDK",
+    "CHAT_CLAUDE_AGENT_CROSS_USER_PROMPT_CACHE",
 )
 
 
@@ -403,6 +342,49 @@ _CONFIG_ENV_VARS = (
 def _clean_config_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in _CONFIG_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
+
+
+class TestNormalizeModelName:
+    """Tests for _normalize_model_name — shared provider-aware normalization."""
+
+    def test_strips_provider_prefix(self, monkeypatch, _clean_config_env):
+        from backend.copilot import config as cfg_mod
+
+        cfg = cfg_mod.ChatConfig(
+            use_openrouter=False,
+            api_key=None,
+            base_url=None,
+            use_claude_code_subscription=False,
+        )
+        monkeypatch.setattr("backend.copilot.sdk.service.config", cfg)
+        assert _normalize_model_name("anthropic/claude-opus-4.6") == "claude-opus-4-6"
+
+    def test_dots_preserved_for_openrouter(self, monkeypatch, _clean_config_env):
+        from backend.copilot import config as cfg_mod
+
+        cfg = cfg_mod.ChatConfig(
+            use_openrouter=True,
+            api_key="or-key",
+            base_url="https://openrouter.ai/api/v1",
+            use_claude_code_subscription=False,
+        )
+        monkeypatch.setattr("backend.copilot.sdk.service.config", cfg)
+        assert _normalize_model_name("anthropic/claude-opus-4.6") == "claude-opus-4.6"
+
+    def test_no_prefix_no_dots(self, monkeypatch, _clean_config_env):
+        from backend.copilot import config as cfg_mod
+
+        cfg = cfg_mod.ChatConfig(
+            use_openrouter=False,
+            api_key=None,
+            base_url=None,
+            use_claude_code_subscription=False,
+        )
+        monkeypatch.setattr("backend.copilot.sdk.service.config", cfg)
+        assert (
+            _normalize_model_name("claude-sonnet-4-20250514")
+            == "claude-sonnet-4-20250514"
+        )
 
 
 class TestResolveSdkModel:
@@ -612,3 +594,83 @@ class TestSafeCloseSdkClient:
         client.__aexit__ = AsyncMock(side_effect=ValueError("invalid argument"))
         with pytest.raises(ValueError, match="invalid argument"):
             await _safe_close_sdk_client(client, "[test]")
+
+
+# ---------------------------------------------------------------------------
+# SystemPromptPreset — cross-user prompt caching
+# ---------------------------------------------------------------------------
+
+
+class TestSystemPromptPreset:
+    """Tests for _build_system_prompt_value — cross-user prompt caching."""
+
+    def test_preset_dict_structure_when_enabled(self):
+        """When cross_user_cache is True, returns a _SystemPromptPreset dict."""
+        custom_prompt = "You are a helpful assistant."
+        result = _build_system_prompt_value(custom_prompt, cross_user_cache=True)
+
+        assert isinstance(result, dict)
+        assert result["type"] == "preset"
+        assert result["preset"] == "claude_code"
+        assert result["append"] == custom_prompt
+        assert result["exclude_dynamic_sections"] is True
+
+    def test_raw_string_when_disabled(self):
+        """When cross_user_cache is False, returns the raw string."""
+        custom_prompt = "You are a helpful assistant."
+        result = _build_system_prompt_value(custom_prompt, cross_user_cache=False)
+
+        assert isinstance(result, str)
+        assert result == custom_prompt
+
+    def test_empty_string_with_cache_enabled(self):
+        """Empty system_prompt with cross_user_cache=True produces append=''."""
+        result = _build_system_prompt_value("", cross_user_cache=True)
+
+        assert isinstance(result, dict)
+        assert result["type"] == "preset"
+        assert result["preset"] == "claude_code"
+        assert result["append"] == ""
+        assert result["exclude_dynamic_sections"] is True
+
+    def test_resume_and_fresh_share_the_same_static_prefix(self):
+        """Every turn (fresh + --resume) must emit the same preset dict
+        so the cross-user cache prefix match works on all turns.  This
+        relies on CLI ≥ 2.1.98 (installed in the Docker image); older
+        CLIs would crash on --resume + excludeDynamicSections=True."""
+        fresh = _build_system_prompt_value("sys", cross_user_cache=True)
+        resumed = _build_system_prompt_value("sys", cross_user_cache=True)
+        assert fresh == resumed
+        assert isinstance(fresh, dict)
+        assert fresh.get("exclude_dynamic_sections") is True
+
+    def test_default_config_is_enabled(self, _clean_config_env):
+        """The default value for claude_agent_cross_user_prompt_cache is True."""
+        cfg = cfg_mod.ChatConfig(
+            use_openrouter=False,
+            api_key=None,
+            base_url=None,
+            use_claude_code_subscription=False,
+        )
+        assert cfg.claude_agent_cross_user_prompt_cache is True
+
+    def test_env_var_disables_cache(self, _clean_config_env, monkeypatch):
+        """CHAT_CLAUDE_AGENT_CROSS_USER_PROMPT_CACHE=false disables caching."""
+        monkeypatch.setenv("CHAT_CLAUDE_AGENT_CROSS_USER_PROMPT_CACHE", "false")
+        cfg = cfg_mod.ChatConfig(
+            use_openrouter=False,
+            api_key=None,
+            base_url=None,
+            use_claude_code_subscription=False,
+        )
+        assert cfg.claude_agent_cross_user_prompt_cache is False
+
+
+class TestIdleTimeoutConstant:
+    """SECRT-2247: long-running work now uses async start+poll pattern
+    (run_sub_session / run_agent), so no single MCP tool call ever blocks
+    the stream close to the idle limit. The plain 10-min cap from the
+    original code is restored."""
+
+    def test_idle_timeout_is_10_min(self):
+        assert _IDLE_TIMEOUT_SECONDS == 10 * 60

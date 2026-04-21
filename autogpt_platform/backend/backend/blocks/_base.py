@@ -25,6 +25,7 @@ from backend.data.model import (
     Credentials,
     CredentialsFieldInfo,
     CredentialsMetaInput,
+    NodeExecutionStats,
     SchemaField,
     is_credentials_field_name,
 )
@@ -43,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from backend.data.execution import ExecutionContext
-    from backend.data.model import ContributorDetails, NodeExecutionStats
+    from backend.data.model import ContributorDetails
 
     from ..data.graph import Link
 
@@ -167,9 +168,31 @@ class BlockSchema(BaseModel):
         return cls.cached_jsonschema
 
     @classmethod
-    def validate_data(cls, data: BlockInput) -> str | None:
+    def validate_data(
+        cls,
+        data: BlockInput,
+        exclude_fields: set[str] | None = None,
+    ) -> str | None:
+        schema = cls.jsonschema()
+        if exclude_fields:
+            # Drop the excluded fields from both the properties and the
+            # ``required`` list so jsonschema doesn't flag them as missing.
+            # Used by the dry-run path to skip credentials validation while
+            # still validating the remaining block inputs.
+            schema = {
+                **schema,
+                "properties": {
+                    k: v
+                    for k, v in schema.get("properties", {}).items()
+                    if k not in exclude_fields
+                },
+                "required": [
+                    r for r in schema.get("required", []) if r not in exclude_fields
+                ],
+            }
+            data = {k: v for k, v in data.items() if k not in exclude_fields}
         return json.validate_with_jsonschema(
-            schema=cls.jsonschema(),
+            schema=schema,
             data={k: v for k, v in data.items() if v is not None},
         )
 
@@ -420,6 +443,19 @@ class BlockWebhookConfig(BlockManualWebhookConfig):
 class Block(ABC, Generic[BlockSchemaInputType, BlockSchemaOutputType]):
     _optimized_description: ClassVar[str | None] = None
 
+    def extra_runtime_cost(self, execution_stats: NodeExecutionStats) -> int:
+        """Return extra runtime cost to charge after this block run completes.
+
+        Called by the executor after a block finishes with COMPLETED status.
+        The return value is the number of additional base-cost credits to
+        charge beyond the single credit already collected by charge_usage
+        at the start of execution. Defaults to 0 (no extra charges).
+
+        Override in blocks (e.g. OrchestratorBlock) that make multiple LLM
+        calls within one run and should be billed per call.
+        """
+        return 0
+
     def __init__(
         self,
         id: str = "",
@@ -455,8 +491,6 @@ class Block(ABC, Generic[BlockSchemaInputType, BlockSchemaOutputType]):
             disabled: If the block is disabled, it will not be available for execution.
             static_output: Whether the output links of the block are static by default.
         """
-        from backend.data.model import NodeExecutionStats
-
         self.id = id
         self.input_schema = input_schema
         self.output_schema = output_schema
@@ -474,7 +508,7 @@ class Block(ABC, Generic[BlockSchemaInputType, BlockSchemaOutputType]):
         self.is_sensitive_action = is_sensitive_action
         # Read from ClassVar set by initialize_blocks()
         self.optimized_description: str | None = type(self)._optimized_description
-        self.execution_stats: "NodeExecutionStats" = NodeExecutionStats()
+        self.execution_stats: NodeExecutionStats = NodeExecutionStats()
 
         if self.webhook_config:
             if isinstance(self.webhook_config, BlockWebhookConfig):
@@ -554,7 +588,7 @@ class Block(ABC, Generic[BlockSchemaInputType, BlockSchemaOutputType]):
                 return data
         raise ValueError(f"{self.name} did not produce any output for {output}")
 
-    def merge_stats(self, stats: "NodeExecutionStats") -> "NodeExecutionStats":
+    def merge_stats(self, stats: NodeExecutionStats) -> NodeExecutionStats:
         self.execution_stats += stats
         return self.execution_stats
 
@@ -705,11 +739,16 @@ class Block(ABC, Generic[BlockSchemaInputType, BlockSchemaOutputType]):
         # (e.g. AgentExecutorBlock) get proper input validation.
         is_dry_run = getattr(kwargs.get("execution_context"), "dry_run", False)
         if is_dry_run:
+            # Credential fields may be absent (LLM-built agents often skip
+            # wiring them) or nullified earlier in the pipeline. Validate
+            # the non-credential inputs against a schema with those fields
+            # excluded — stripping only the data while keeping them in the
+            # ``required`` list would falsely report ``'credentials' is a
+            # required property``.
             cred_field_names = set(self.input_schema.get_credentials_fields().keys())
-            non_cred_data = {
-                k: v for k, v in input_data.items() if k not in cred_field_names
-            }
-            if error := self.input_schema.validate_data(non_cred_data):
+            if error := self.input_schema.validate_data(
+                input_data, exclude_fields=cred_field_names
+            ):
                 raise BlockInputError(
                     message=f"Unable to execute block with invalid input data: {error}",
                     block_name=self.name,

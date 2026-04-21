@@ -12,7 +12,7 @@ import fastapi
 from autogpt_libs.auth.dependencies import get_user_id, requires_user
 from fastapi import Query, UploadFile
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.data.workspace import (
     WorkspaceFile,
@@ -29,7 +29,9 @@ from backend.util.workspace import WorkspaceManager
 from backend.util.workspace_storage import get_workspace_storage
 
 
-def _sanitize_filename_for_header(filename: str) -> str:
+def _sanitize_filename_for_header(
+    filename: str, disposition: str = "attachment"
+) -> str:
     """
     Sanitize filename for Content-Disposition header to prevent header injection.
 
@@ -44,11 +46,11 @@ def _sanitize_filename_for_header(filename: str) -> str:
     # Check if filename has non-ASCII characters
     try:
         sanitized.encode("ascii")
-        return f'attachment; filename="{sanitized}"'
+        return f'{disposition}; filename="{sanitized}"'
     except UnicodeEncodeError:
         # Use RFC5987 encoding for UTF-8 filenames
         encoded = quote(sanitized, safe="")
-        return f"attachment; filename*=UTF-8''{encoded}"
+        return f"{disposition}; filename*=UTF-8''{encoded}"
 
 
 logger = logging.getLogger(__name__)
@@ -58,19 +60,26 @@ router = fastapi.APIRouter(
 )
 
 
-def _create_streaming_response(content: bytes, file: WorkspaceFile) -> Response:
+def _create_streaming_response(
+    content: bytes, file: WorkspaceFile, *, inline: bool = False
+) -> Response:
     """Create a streaming response for file content."""
+    disposition = _sanitize_filename_for_header(
+        file.name, disposition="inline" if inline else "attachment"
+    )
     return Response(
         content=content,
         media_type=file.mime_type,
         headers={
-            "Content-Disposition": _sanitize_filename_for_header(file.name),
+            "Content-Disposition": disposition,
             "Content-Length": str(len(content)),
         },
     )
 
 
-async def _create_file_download_response(file: WorkspaceFile) -> Response:
+async def create_file_download_response(
+    file: WorkspaceFile, *, inline: bool = False
+) -> Response:
     """
     Create a download response for a workspace file.
 
@@ -82,7 +91,7 @@ async def _create_file_download_response(file: WorkspaceFile) -> Response:
     # For local storage, stream the file directly
     if file.storage_path.startswith("local://"):
         content = await storage.retrieve(file.storage_path)
-        return _create_streaming_response(content, file)
+        return _create_streaming_response(content, file, inline=inline)
 
     # For GCS, try to redirect to signed URL, fall back to streaming
     try:
@@ -90,7 +99,7 @@ async def _create_file_download_response(file: WorkspaceFile) -> Response:
         # If we got back an API path (fallback), stream directly instead
         if url.startswith("/api/"):
             content = await storage.retrieve(file.storage_path)
-            return _create_streaming_response(content, file)
+            return _create_streaming_response(content, file, inline=inline)
         return fastapi.responses.RedirectResponse(url=url, status_code=302)
     except Exception as e:
         # Log the signed URL failure with context
@@ -102,7 +111,7 @@ async def _create_file_download_response(file: WorkspaceFile) -> Response:
         # Fall back to streaming directly from GCS
         try:
             content = await storage.retrieve(file.storage_path)
-            return _create_streaming_response(content, file)
+            return _create_streaming_response(content, file, inline=inline)
         except Exception as fallback_error:
             logger.error(
                 f"Fallback streaming also failed for file {file.id} "
@@ -131,9 +140,26 @@ class StorageUsageResponse(BaseModel):
     file_count: int
 
 
+class WorkspaceFileItem(BaseModel):
+    id: str
+    name: str
+    path: str
+    mime_type: str
+    size_bytes: int
+    metadata: dict = Field(default_factory=dict)
+    created_at: str
+
+
+class ListFilesResponse(BaseModel):
+    files: list[WorkspaceFileItem]
+    offset: int = 0
+    has_more: bool = False
+
+
 @router.get(
     "/files/{file_id}/download",
     summary="Download file by ID",
+    operation_id="getWorkspaceDownloadFileById",
 )
 async def download_file(
     user_id: Annotated[str, fastapi.Security(get_user_id)],
@@ -152,12 +178,13 @@ async def download_file(
     if file is None:
         raise fastapi.HTTPException(status_code=404, detail="File not found")
 
-    return await _create_file_download_response(file)
+    return await create_file_download_response(file)
 
 
 @router.delete(
     "/files/{file_id}",
     summary="Delete a workspace file",
+    operation_id="deleteWorkspaceFile",
 )
 async def delete_workspace_file(
     user_id: Annotated[str, fastapi.Security(get_user_id)],
@@ -183,6 +210,7 @@ async def delete_workspace_file(
 @router.post(
     "/files/upload",
     summary="Upload file to workspace",
+    operation_id="uploadWorkspaceFile",
 )
 async def upload_file(
     user_id: Annotated[str, fastapi.Security(get_user_id)],
@@ -196,6 +224,9 @@ async def upload_file(
     Files are stored in session-scoped paths when session_id is provided,
     so the agent's session-scoped tools can discover them automatically.
     """
+    # Empty-string session_id drops session scoping; normalize to None.
+    session_id = session_id or None
+
     config = Config()
 
     # Sanitize filename — strip any directory components
@@ -250,16 +281,27 @@ async def upload_file(
     manager = WorkspaceManager(user_id, workspace.id, session_id)
     try:
         workspace_file = await manager.write_file(
-            content, filename, overwrite=overwrite
+            content, filename, overwrite=overwrite, metadata={"origin": "user-upload"}
         )
     except ValueError as e:
-        raise fastapi.HTTPException(status_code=409, detail=str(e)) from e
+        # write_file raises ValueError for both path-conflict and size-limit
+        # cases; map each to its correct HTTP status.
+        message = str(e)
+        if message.startswith("File too large"):
+            raise fastapi.HTTPException(status_code=413, detail=message) from e
+        raise fastapi.HTTPException(status_code=409, detail=message) from e
 
     # Post-write storage check — eliminates TOCTOU race on the quota.
     # If a concurrent upload pushed us over the limit, undo this write.
     new_total = await get_workspace_total_size(workspace.id)
     if storage_limit_bytes and new_total > storage_limit_bytes:
-        await soft_delete_workspace_file(workspace_file.id, workspace.id)
+        try:
+            await soft_delete_workspace_file(workspace_file.id, workspace.id)
+        except Exception as e:
+            logger.warning(
+                f"Failed to soft-delete over-quota file {workspace_file.id} "
+                f"in workspace {workspace.id}: {e}"
+            )
         raise fastapi.HTTPException(
             status_code=413,
             detail={
@@ -281,6 +323,7 @@ async def upload_file(
 @router.get(
     "/storage/usage",
     summary="Get workspace storage usage",
+    operation_id="getWorkspaceStorageUsage",
 )
 async def get_storage_usage(
     user_id: Annotated[str, fastapi.Security(get_user_id)],
@@ -300,4 +343,58 @@ async def get_storage_usage(
         limit_bytes=limit_bytes,
         used_percent=round((used_bytes / limit_bytes) * 100, 1) if limit_bytes else 0,
         file_count=file_count,
+    )
+
+
+@router.get(
+    "/files",
+    summary="List workspace files",
+    operation_id="listWorkspaceFiles",
+)
+async def list_workspace_files(
+    user_id: Annotated[str, fastapi.Security(get_user_id)],
+    session_id: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> ListFilesResponse:
+    """
+    List files in the user's workspace.
+
+    When session_id is provided, only files for that session are returned.
+    Otherwise, all files across sessions are listed. Results are paginated
+    via `limit`/`offset`; `has_more` indicates whether additional pages exist.
+    """
+    workspace = await get_or_create_workspace(user_id)
+
+    # Treat empty-string session_id the same as omitted — an empty value
+    # would otherwise silently list files across every session instead of
+    # scoping to one.
+    session_id = session_id or None
+
+    manager = WorkspaceManager(user_id, workspace.id, session_id)
+    include_all = session_id is None
+    # Fetch one extra to compute has_more without a separate count query.
+    files = await manager.list_files(
+        limit=limit + 1,
+        offset=offset,
+        include_all_sessions=include_all,
+    )
+    has_more = len(files) > limit
+    page = files[:limit]
+
+    return ListFilesResponse(
+        files=[
+            WorkspaceFileItem(
+                id=f.id,
+                name=f.name,
+                path=f.path,
+                mime_type=f.mime_type,
+                size_bytes=f.size_bytes,
+                metadata=f.metadata or {},
+                created_at=f.created_at.isoformat(),
+            )
+            for f in page
+        ],
+        offset=offset,
+        has_more=has_more,
     )
