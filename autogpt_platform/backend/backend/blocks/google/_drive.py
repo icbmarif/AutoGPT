@@ -1,6 +1,6 @@
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.data.model import SchemaField
 
@@ -59,6 +59,18 @@ class GoogleDriveFile(_GoogleDriveFileBase):
         alias="_credentials_id",
         description="Internal: credential ID for authentication",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_bare_id_string(cls, value: Any) -> Any:
+        # API clients often send just a file ID string (e.g. a spreadsheet
+        # ID pasted from a URL) instead of the full object emitted by the
+        # picker. Promote that to {id: <str>} so the block still runs.
+        # The UI picker already emits the full object so this path only
+        # kicks in for direct API callers.
+        if isinstance(value, str):
+            return {"id": value}
+        return value
 
 
 def GoogleDriveFileField(
