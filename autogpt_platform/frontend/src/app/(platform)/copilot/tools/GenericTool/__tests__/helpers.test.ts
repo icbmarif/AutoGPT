@@ -36,6 +36,23 @@ describe("formatToolName", () => {
   it("handles already capitalized names", () => {
     expect(formatToolName("WebSearch")).toBe("WebSearch");
   });
+
+  it("uses friendly display name for sub-AutoPilot tools", () => {
+    expect(formatToolName("run_sub_session")).toBe("Sub-AutoPilot");
+    expect(formatToolName("get_sub_session_result")).toBe(
+      "Sub-AutoPilot result",
+    );
+  });
+
+  it("uses the 'Action' label for run_block (frontend parlance)", () => {
+    expect(formatToolName("run_block")).toBe("Action");
+  });
+
+  it("strips redundant 'run_' prefix for other run_* tools", () => {
+    // "Running Run agent" reads awkwardly — the override produces
+    // "Running Agent".
+    expect(formatToolName("run_agent")).toBe("Agent");
+  });
 });
 
 describe("getToolCategory", () => {
@@ -185,14 +202,14 @@ describe("getAnimationText", () => {
     expect(getAnimationText(part, "bash")).toBe("Ran: echo hello");
   });
 
-  it("shows exit code on non-zero exit", () => {
+  it("still shows the command even on non-zero exit (exit code lives in the accordion description)", () => {
     const part = makePart({
       type: "tool-bash_exec",
       state: "output-available",
       input: { command: "false" },
       output: { exit_code: 1 },
     });
-    expect(getAnimationText(part, "bash")).toBe("Command exited with code 1");
+    expect(getAnimationText(part, "bash")).toBe("Ran: false");
   });
 
   it("shows error text for bash failure", () => {

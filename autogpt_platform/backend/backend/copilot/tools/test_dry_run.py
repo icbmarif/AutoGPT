@@ -585,7 +585,8 @@ def test_prepare_dry_run_orchestrator_block():
     assert result is not None
     # Model is overridden to the simulation model (not the user's model).
     assert result["model"] != "gpt-4o"
-    assert result["agent_mode_max_iterations"] == 1
+    # Capped to min(original, 10); user's 10 passes through unchanged.
+    assert result["agent_mode_max_iterations"] == 10
     assert result["_dry_run_api_key"] == "sk-or-test-key"
     # Original input_data should not be mutated.
     assert input_data["model"] == "gpt-4o"
@@ -713,13 +714,11 @@ async def test_simulate_agent_output_block_no_name():
 # ---------------------------------------------------------------------------
 
 
-def _make_dry_run_session(dry_run: bool = True) -> MagicMock:
-    """Return a minimal ChatSession mock with dry_run set."""
-    session = MagicMock()
-    session.dry_run = dry_run
-    session.session_id = "test-session-id"
-    session.successful_agent_runs = {}
-    return session
+def _make_dry_run_session(dry_run: bool = True):
+    """Return a real ``ChatSession`` with *dry_run* set on metadata."""
+    from backend.copilot.model import ChatSession
+
+    return ChatSession.new("test-user", dry_run=dry_run)
 
 
 def _make_graph_mock(graph_id: str = "g1") -> MagicMock:
@@ -754,15 +753,15 @@ async def test_run_agent_session_dry_run_overrides_kwargs():
         captured_params["dry_run"] = params.dry_run
         return {}, None
 
-    with patch(
-        "backend.copilot.tools.run_agent.fetch_graph_from_store_slug",
-        new_callable=AsyncMock,
-        return_value=(graph, None),
-    ), patch.object(
-        tool, "_check_prerequisites", side_effect=capture_prerequisites
-    ), patch.object(
-        tool, "_run_agent", new_callable=AsyncMock
-    ) as mock_run_agent:
+    with (
+        patch(
+            "backend.copilot.tools.run_agent.fetch_graph_from_store_slug",
+            new_callable=AsyncMock,
+            return_value=(graph, None),
+        ),
+        patch.object(tool, "_check_prerequisites", side_effect=capture_prerequisites),
+        patch.object(tool, "_run_agent", new_callable=AsyncMock) as mock_run_agent,
+    ):
         mock_run_agent.return_value = MagicMock()
 
         # Pass dry_run=False in kwargs — session.dry_run=True should win.
@@ -796,15 +795,15 @@ async def test_run_agent_session_dry_run_false_allows_scheduling():
         captured_params["dry_run"] = params.dry_run
         return {}, None
 
-    with patch(
-        "backend.copilot.tools.run_agent.fetch_graph_from_store_slug",
-        new_callable=AsyncMock,
-        return_value=(graph, None),
-    ), patch.object(
-        tool, "_check_prerequisites", side_effect=capture_prerequisites
-    ), patch.object(
-        tool, "_schedule_agent", new_callable=AsyncMock
-    ) as mock_schedule:
+    with (
+        patch(
+            "backend.copilot.tools.run_agent.fetch_graph_from_store_slug",
+            new_callable=AsyncMock,
+            return_value=(graph, None),
+        ),
+        patch.object(tool, "_check_prerequisites", side_effect=capture_prerequisites),
+        patch.object(tool, "_schedule_agent", new_callable=AsyncMock) as mock_schedule,
+    ):
         mock_schedule.return_value = MagicMock()
 
         await tool._execute(
@@ -840,15 +839,15 @@ async def test_run_agent_session_dry_run_false_allows_llm_dry_run_true():
         captured_params["dry_run"] = params.dry_run
         return {}, None
 
-    with patch(
-        "backend.copilot.tools.run_agent.fetch_graph_from_store_slug",
-        new_callable=AsyncMock,
-        return_value=(graph, None),
-    ), patch.object(
-        tool, "_check_prerequisites", side_effect=capture_prerequisites
-    ), patch.object(
-        tool, "_run_agent", new_callable=AsyncMock
-    ) as mock_run_agent:
+    with (
+        patch(
+            "backend.copilot.tools.run_agent.fetch_graph_from_store_slug",
+            new_callable=AsyncMock,
+            return_value=(graph, None),
+        ),
+        patch.object(tool, "_check_prerequisites", side_effect=capture_prerequisites),
+        patch.object(tool, "_run_agent", new_callable=AsyncMock) as mock_run_agent,
+    ):
         mock_run_agent.return_value = MagicMock()
 
         # LLM passes dry_run=True; normal session must NOT override it to False
