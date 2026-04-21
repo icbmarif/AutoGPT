@@ -253,3 +253,86 @@ class TestBatching:
             )
 
         adapter.send_message.assert_not_awaited()
+
+
+class TestStreamFallback:
+    """Covers the empty-response fallback, including the boundary-flush bug
+    where prior code posted 'AutoPilot didn't produce a response' even though
+    content had already been flushed mid-stream.
+    """
+
+    @staticmethod
+    def _redis_patch():
+        return patch(
+            "backend.copilot.bot.handler.get_redis_async",
+            new=AsyncMock(return_value=AsyncMock(get=AsyncMock(return_value=None))),
+        )
+
+    @pytest.mark.asyncio
+    async def test_empty_stream_sends_fallback(self):
+        api = _api()
+
+        async def empty(*args, **kwargs):
+            if False:
+                yield ""
+
+        api.stream_chat = empty
+        handler = MessageHandler(api)
+        adapter = _adapter()
+
+        with TestStreamFallback._redis_patch():
+            await handler._stream_batch(
+                [("Bently", "u1", "hi")], _ctx(), adapter, "target-1"
+            )
+
+        msgs = [c.args[1] for c in adapter.send_message.await_args_list]
+        assert any("didn't produce a response" in m for m in msgs)
+
+    @pytest.mark.asyncio
+    async def test_whitespace_only_stream_sends_fallback(self):
+        api = _api()
+
+        async def whitespace(*args, **kwargs):
+            yield "   "
+            yield "\n\n"
+
+        api.stream_chat = whitespace
+        handler = MessageHandler(api)
+        adapter = _adapter()
+
+        with TestStreamFallback._redis_patch():
+            await handler._stream_batch(
+                [("Bently", "u1", "hi")], _ctx(), adapter, "target-1"
+            )
+
+        msgs = [c.args[1] for c in adapter.send_message.await_args_list]
+        assert any("didn't produce a response" in m for m in msgs)
+
+    @pytest.mark.asyncio
+    async def test_content_flushed_mid_stream_does_not_trigger_fallback(self):
+        """Regression: before the fix, a response that flushed exactly at a
+        boundary left buffer == "" and the fallback fired after real content
+        had already been posted.
+        """
+        api = _api()
+        adapter = _adapter()
+        adapter.chunk_flush_at = 50
+
+        async def streaming_content(*args, **kwargs):
+            # Exactly flush_at chars → split_at_boundary returns the whole
+            # payload as the post and an empty remainder, so the stream ends
+            # with buffer == "". That USED to fall into the `elif not buffer`
+            # branch and send the "didn't produce a response" fallback.
+            yield "x" * 50
+
+        api.stream_chat = streaming_content
+        handler = MessageHandler(api)
+
+        with TestStreamFallback._redis_patch():
+            await handler._stream_batch(
+                [("Bently", "u1", "hi")], _ctx(), adapter, "target-1"
+            )
+
+        msgs = [c.args[1] for c in adapter.send_message.await_args_list]
+        assert not any("didn't produce a response" in m for m in msgs)
+        assert msgs == ["x" * 50]

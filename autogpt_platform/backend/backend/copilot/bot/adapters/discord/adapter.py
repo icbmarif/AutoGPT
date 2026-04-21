@@ -23,7 +23,13 @@ class DiscordAdapter(PlatformAdapter):
     def __init__(self, api: PlatformAPI):
         intents = discord.Intents.default()
         intents.message_content = True
-        self._client = discord.Client(intents=intents)
+        # AutoPilot output is untrusted w.r.t. mentions — suppress @everyone,
+        # role, and user pings the LLM might produce. Client-level default
+        # applies to every send() + reply() below.
+        self._client = discord.Client(
+            intents=intents,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         self._tree = app_commands.CommandTree(self._client)
         self._api = api
         self._on_message_callback: Optional[MessageCallback] = None

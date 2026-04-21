@@ -134,6 +134,7 @@ class MessageHandler:
 
         flush_at = adapter.chunk_flush_at
         buffer = ""
+        sent_any_content = False
 
         typing_task = asyncio.create_task(_keep_typing(adapter, target_id))
         try:
@@ -150,6 +151,8 @@ class MessageHandler:
                     post, buffer = split_at_boundary(buffer, flush_at)
                     if post:
                         await adapter.send_message(target_id, post)
+                        if post.strip():
+                            sent_any_content = True
         except DuplicateChatMessageError:
             # Another in-flight turn is already processing this exact message —
             # stay quiet so the user doesn't get a double response.
@@ -180,7 +183,9 @@ class MessageHandler:
 
         if buffer.strip():
             await adapter.send_message(target_id, buffer)
-        elif not buffer:
+            sent_any_content = True
+
+        if not sent_any_content:
             await adapter.send_message(
                 target_id,
                 "AutoPilot didn't produce a response. Try rephrasing your question.",
