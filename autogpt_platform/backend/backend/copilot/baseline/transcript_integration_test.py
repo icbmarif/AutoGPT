@@ -85,18 +85,39 @@ class TestResolveBaselineModel:
         assert _resolve_baseline_model(None) == config.fast_model
 
     def test_fast_model_default_is_kimi(self):
-        """Sanity: Kimi K2.6 is the shipped default cheap reasoning route."""
-        assert config.fast_model == "moonshotai/kimi-k2.6"
+        """Sanity: Kimi K2.6 is the shipped default cheap reasoning route.
+
+        Asserts the declared ``Field`` default — env-independent — so a
+        deploy-time ``CHAT_FAST_MODEL`` rollback override doesn't fail CI
+        while still pinning the shipped default.
+        """
+        from backend.copilot.config import ChatConfig
+
+        assert ChatConfig.model_fields["fast_model"].default == "moonshotai/kimi-k2.6"
 
     def test_sdk_and_baseline_standard_defaults_diverge(self):
         """The whole point of the split: baseline cheap (Kimi) vs SDK
-        Anthropic-only (Sonnet).  If this equality ever flips they've
-        re-collapsed and someone lost the cost savings."""
-        assert config.model != config.fast_model
+        Anthropic-only (Sonnet).  If the shipped defaults ever collapse
+        to the same value someone lost the cost savings.  Checked against
+        ``Field`` defaults, not the env-backed singleton."""
+        from backend.copilot.config import ChatConfig
+
+        assert (
+            ChatConfig.model_fields["model"].default
+            != ChatConfig.model_fields["fast_model"].default
+        )
 
     def test_standard_and_advanced_models_differ(self):
-        """Advanced tier defaults to a different (Opus) model than standard."""
-        assert config.fast_model != config.advanced_model
+        """Advanced tier defaults to a different (Opus) model than standard.
+
+        Checked against declared ``Field`` defaults so operator env
+        overrides don't flake the test."""
+        from backend.copilot.config import ChatConfig
+
+        assert (
+            ChatConfig.model_fields["fast_model"].default
+            != ChatConfig.model_fields["advanced_model"].default
+        )
 
 
 class TestLoadPriorTranscript:
