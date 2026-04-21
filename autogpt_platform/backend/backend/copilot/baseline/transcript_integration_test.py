@@ -63,21 +63,40 @@ def _make_session_messages(*roles: str) -> list[ChatMessage]:
 
 
 class TestResolveBaselineModel:
-    """Baseline model resolution honours the per-request tier toggle."""
+    """Baseline model resolution honours the per-request tier toggle.
+
+    The baseline resolver diverged from SDK's ``resolve_chat_model`` in this
+    PR: ``standard`` / ``None`` on baseline now picks ``config.fast_model``
+    (Kimi K2.6 by default) instead of ``config.model`` (Sonnet), because
+    baseline speaks plain OpenAI-compat and can route anywhere cheaper,
+    while SDK still needs an Anthropic endpoint for the Claude Agent SDK
+    CLI.  ``advanced`` remains ``config.advanced_model`` (Opus) on both
+    paths — there's no Kimi equivalent at the top tier.
+    """
 
     def test_advanced_tier_selects_advanced_model(self):
         assert _resolve_baseline_model("advanced") == config.advanced_model
 
-    def test_standard_tier_selects_default_model(self):
-        assert _resolve_baseline_model("standard") == config.model
+    def test_standard_tier_selects_fast_model(self):
+        assert _resolve_baseline_model("standard") == config.fast_model
 
-    def test_none_tier_selects_default_model(self):
-        """Baseline users without a tier MUST keep the default (standard)."""
-        assert _resolve_baseline_model(None) == config.model
+    def test_none_tier_selects_fast_model(self):
+        """Baseline users without a tier get the cheap fast default."""
+        assert _resolve_baseline_model(None) == config.fast_model
+
+    def test_fast_model_default_is_kimi(self):
+        """Sanity: Kimi K2.6 is the shipped default cheap reasoning route."""
+        assert config.fast_model == "moonshotai/kimi-k2.6"
+
+    def test_sdk_and_baseline_standard_defaults_diverge(self):
+        """The whole point of the split: baseline cheap (Kimi) vs SDK
+        Anthropic-only (Sonnet).  If this equality ever flips they've
+        re-collapsed and someone lost the cost savings."""
+        assert config.model != config.fast_model
 
     def test_standard_and_advanced_models_differ(self):
         """Advanced tier defaults to a different (Opus) model than standard."""
-        assert config.model != config.advanced_model
+        assert config.fast_model != config.advanced_model
 
 
 class TestLoadPriorTranscript:

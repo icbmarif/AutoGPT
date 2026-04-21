@@ -132,18 +132,36 @@ class OpenRouterDeltaExtension(BaseModel):
         return "".join(d.visible_text for d in self.reasoning_details)
 
 
+def _is_reasoning_route(model: str) -> bool:
+    """Return True when the route supports OpenRouter's ``reasoning`` extension.
+
+    OpenRouter exposes reasoning tokens via a unified ``reasoning`` request
+    param that works on any provider that supports extended thinking —
+    currently Anthropic (Claude Opus / Sonnet) and Moonshot (Kimi K2.6 +
+    kimi-k2-thinking) advertise it in their ``supported_parameters``.
+    Other providers silently drop the field, but we skip it anyway to keep
+    the payload tight and avoid confusing cache diagnostics.
+
+    Kept separate from :func:`backend.copilot.baseline.service._is_anthropic_model`
+    because ``cache_control`` is strictly Anthropic-specific (Moonshot does
+    its own auto-caching), so the two gates must not conflate.
+    """
+    lowered = model.lower()
+    return (
+        "claude" in lowered
+        or lowered.startswith("anthropic")
+        or lowered.startswith("moonshotai/")
+        or "kimi" in lowered
+    )
+
+
 def reasoning_extra_body(model: str, max_thinking_tokens: int) -> dict[str, Any] | None:
     """Build the ``extra_body["reasoning"]`` fragment for the OpenAI client.
 
-    Returns ``None`` for non-Anthropic routes (other OpenRouter providers
-    ignore the field but we skip it anyway to keep the payload minimal)
-    and for ``max_thinking_tokens <= 0`` (operator kill switch).
+    Returns ``None`` for non-reasoning routes and for
+    ``max_thinking_tokens <= 0`` (operator kill switch).
     """
-    # Imported lazily to avoid pulling service.py at module load — service.py
-    # imports this module, and the lazy import keeps the dependency one-way.
-    from backend.copilot.baseline.service import _is_anthropic_model
-
-    if not _is_anthropic_model(model) or max_thinking_tokens <= 0:
+    if not _is_reasoning_route(model) or max_thinking_tokens <= 0:
         return None
     return {"reasoning": {"max_tokens": max_thinking_tokens}}
 

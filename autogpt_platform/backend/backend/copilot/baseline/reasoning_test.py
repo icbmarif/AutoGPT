@@ -12,6 +12,7 @@ from backend.copilot.baseline.reasoning import (
     BaselineReasoningEmitter,
     OpenRouterDeltaExtension,
     ReasoningDetail,
+    _is_reasoning_route,
     reasoning_extra_body,
 )
 from backend.copilot.model import ChatMessage
@@ -135,6 +136,32 @@ class TestOpenRouterDeltaExtension:
         assert ext.visible_text() == "real"
 
 
+class TestIsReasoningRoute:
+    def test_anthropic_routes(self):
+        assert _is_reasoning_route("anthropic/claude-sonnet-4-6")
+        assert _is_reasoning_route("claude-3-5-sonnet-20241022")
+        assert _is_reasoning_route("anthropic.claude-3-5-sonnet")
+        assert _is_reasoning_route("ANTHROPIC/Claude-Opus")  # case-insensitive
+
+    def test_moonshot_kimi_routes(self):
+        # OpenRouter advertises the ``reasoning`` extension on Moonshot
+        # endpoints — both K2.6 (the new baseline default) and the
+        # reasoning-native kimi-k2-thinking variant.
+        assert _is_reasoning_route("moonshotai/kimi-k2.6")
+        assert _is_reasoning_route("moonshotai/kimi-k2-thinking")
+        assert _is_reasoning_route("moonshotai/kimi-k2.5")
+        # Direct (non-OpenRouter) model ids also resolve via the ``kimi``
+        # substring so a future bare ``kimi-k3`` id would still match.
+        assert _is_reasoning_route("kimi-k2-instruct")
+
+    def test_other_providers_rejected(self):
+        assert not _is_reasoning_route("openai/gpt-4o")
+        assert not _is_reasoning_route("google/gemini-2.5-pro")
+        assert not _is_reasoning_route("xai/grok-4")
+        assert not _is_reasoning_route("meta-llama/llama-3.3-70b-instruct")
+        assert not _is_reasoning_route("deepseek/deepseek-r1")
+
+
 class TestReasoningExtraBody:
     def test_anthropic_route_returns_fragment(self):
         assert reasoning_extra_body("anthropic/claude-sonnet-4-6", 4096) == {
@@ -146,16 +173,30 @@ class TestReasoningExtraBody:
             "reasoning": {"max_tokens": 2048}
         }
 
-    def test_non_anthropic_route_returns_none(self):
+    def test_kimi_routes_return_fragment(self):
+        # Kimi K2.6 ships the same OpenRouter ``reasoning`` extension as
+        # Anthropic, so the gate widened with this PR and the fragment
+        # must now materialise on Moonshot routes too.
+        assert reasoning_extra_body("moonshotai/kimi-k2.6", 8192) == {
+            "reasoning": {"max_tokens": 8192}
+        }
+        assert reasoning_extra_body("moonshotai/kimi-k2-thinking", 4096) == {
+            "reasoning": {"max_tokens": 4096}
+        }
+
+    def test_non_reasoning_route_returns_none(self):
         assert reasoning_extra_body("openai/gpt-4o", 4096) is None
         assert reasoning_extra_body("google/gemini-2.5-pro", 4096) is None
+        assert reasoning_extra_body("xai/grok-4", 4096) is None
 
     def test_zero_max_tokens_kill_switch(self):
         # Operator kill switch: ``max_thinking_tokens <= 0`` disables the
-        # ``reasoning`` extra_body fragment even on an Anthropic route.
-        # Lets us silence reasoning without dropping the SDK path's budget.
+        # ``reasoning`` extra_body fragment on ANY reasoning route (Anthropic
+        # or Kimi).  Lets us silence reasoning without dropping the SDK
+        # path's budget.
         assert reasoning_extra_body("anthropic/claude-sonnet-4-6", 0) is None
         assert reasoning_extra_body("anthropic/claude-sonnet-4-6", -1) is None
+        assert reasoning_extra_body("moonshotai/kimi-k2.6", 0) is None
 
 
 class TestBaselineReasoningEmitter:

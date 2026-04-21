@@ -33,9 +33,24 @@ class ChatConfig(BaseSettings):
     # "advanced" picks the model inside that path.
     model: str = Field(
         default="anthropic/claude-sonnet-4-6",
-        description="Model used for the 'standard' tier (Sonnet by default). "
-        "Applies to both baseline (fast) and SDK (extended thinking) paths. "
-        "Override via CHAT_MODEL env var.",
+        description="Model used for the 'standard' tier in the SDK "
+        "(extended thinking) path (Sonnet by default). The baseline / fast "
+        "path reads ``fast_model`` instead so the two paths can evolve "
+        "independently (cheaper provider on baseline, Anthropic-only CLI on "
+        "SDK). Override via CHAT_MODEL env var.",
+    )
+    fast_model: str = Field(
+        default="moonshotai/kimi-k2.6",
+        description="Model used for the 'standard' / ``None`` tier on the "
+        "baseline (fast) path. Kimi K2.6 by default: ~5x cheaper input and "
+        "~5.4x cheaper output than Sonnet, SWE-Bench Verified parity with "
+        "Opus, and OpenRouter advertises the ``reasoning`` + "
+        "``include_reasoning`` extension params on the Moonshot endpoints — "
+        "so our existing baseline reasoning plumbing lights up without "
+        "provider-specific code. Fall back to the Anthropic route by "
+        "setting ``CHAT_FAST_MODEL=anthropic/claude-sonnet-4-6`` (then "
+        "``cache_control`` breakpoints reactivate via "
+        "``_is_anthropic_model``).",
     )
     advanced_model: str = Field(
         default="anthropic/claude-opus-4-7",
