@@ -23,6 +23,7 @@ This module keeps the wire-level concerns in one place:
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from typing import Any
 
@@ -41,6 +42,19 @@ logger = logging.getLogger(__name__)
 
 
 _VISIBLE_REASONING_TYPES = frozenset({"reasoning.text", "reasoning.summary"})
+
+# Coalescing thresholds for ``StreamReasoningDelta`` emission.  OpenRouter's
+# Kimi K2.6 endpoint tokenises reasoning at a much finer grain than Anthropic
+# (~4,700 deltas per turn in one observed session, vs ~28 for Sonnet); without
+# coalescing, every chunk is one Redis ``xadd`` + one SSE frame + one React
+# re-render of the non-virtualised chat list, which paint-storms the browser
+# main thread and freezes the UI.  Batching into ~32-char / ~40 ms windows
+# cuts the event rate ~100x while staying snappy enough that the Reasoning
+# collapse still feels live (well under the ~100 ms perceptual threshold).
+# Per-delta persistence to ``session.messages`` stays granular — we only
+# coalesce the *wire* emission.
+_COALESCE_MIN_CHARS = 32
+_COALESCE_MAX_INTERVAL_MS = 40.0
 
 
 class ReasoningDetail(BaseModel):
@@ -195,11 +209,24 @@ class BaselineReasoningEmitter:
     def __init__(
         self,
         session_messages: list[ChatMessage] | None = None,
+        *,
+        coalesce_min_chars: int = _COALESCE_MIN_CHARS,
+        coalesce_max_interval_ms: float = _COALESCE_MAX_INTERVAL_MS,
     ) -> None:
         self._block_id: str = str(uuid.uuid4())
         self._open: bool = False
         self._session_messages = session_messages
         self._current_row: ChatMessage | None = None
+        # Coalescing state — ``_pending_delta`` accumulates reasoning text
+        # between wire flushes.  Providers like Kimi K2.6 emit very fine-
+        # grained chunks; batching them reduces Redis ``xadd`` + SSE + React
+        # re-render load by ~100x for equivalent text output.  Tuning knobs
+        # are kwargs so tests can disable coalescing (``=0``) for
+        # deterministic event assertions.
+        self._coalesce_min_chars = coalesce_min_chars
+        self._coalesce_max_interval_ms = coalesce_max_interval_ms
+        self._pending_delta: str = ""
+        self._last_flush_monotonic: float = 0.0
 
     @property
     def is_open(self) -> bool:
@@ -210,39 +237,77 @@ class BaselineReasoningEmitter:
 
         Empty list when the chunk carries no reasoning payload, so this is
         safe to call on every chunk without guarding at the call site.
-        Persistence (when a session message list is attached) happens in
-        lockstep with emission so the row's content stays equal to the
-        concatenated deltas at every delta boundary.
+
+        Persistence (when a session message list is attached) stays
+        per-delta so the DB row's content always equals the concatenation
+        of wire deltas at every chunk boundary, independent of the
+        coalescing window.  Only the wire emission is batched.
         """
         ext = OpenRouterDeltaExtension.from_delta(delta)
         text = ext.visible_text()
         if not text:
             return []
         events: list[StreamBaseResponse] = []
+        # First reasoning text in this block — emit Start + the first Delta
+        # atomically so the frontend Reasoning collapse renders immediately
+        # rather than waiting for the coalesce window to elapse.  Subsequent
+        # chunks buffer into ``_pending_delta`` and only flush when the
+        # char/time thresholds trip.
         if not self._open:
             events.append(StreamReasoningStart(id=self._block_id))
+            events.append(StreamReasoningDelta(id=self._block_id, delta=text))
             self._open = True
+            self._last_flush_monotonic = time.monotonic()
             if self._session_messages is not None:
-                self._current_row = ChatMessage(role="reasoning", content="")
+                self._current_row = ChatMessage(role="reasoning", content=text)
                 self._session_messages.append(self._current_row)
-        events.append(StreamReasoningDelta(id=self._block_id, delta=text))
+            return events
+
+        # Persist per-delta (no coalescing here — the session snapshot stays
+        # consistent at every chunk boundary, independent of the wire
+        # coalesce window).
         if self._current_row is not None:
             self._current_row.content = (self._current_row.content or "") + text
+
+        self._pending_delta += text
+        if self._should_flush_pending():
+            events.append(
+                StreamReasoningDelta(id=self._block_id, delta=self._pending_delta)
+            )
+            self._pending_delta = ""
+            self._last_flush_monotonic = time.monotonic()
         return events
+
+    def _should_flush_pending(self) -> bool:
+        """Return True when the accumulated delta should be emitted now."""
+        if not self._pending_delta:
+            return False
+        if len(self._pending_delta) >= self._coalesce_min_chars:
+            return True
+        elapsed_ms = (time.monotonic() - self._last_flush_monotonic) * 1000.0
+        return elapsed_ms >= self._coalesce_max_interval_ms
 
     def close(self) -> list[StreamBaseResponse]:
         """Emit ``StreamReasoningEnd`` for the open block (if any) and rotate.
 
-        Idempotent — returns ``[]`` when no block is open.  The id rotation
-        guarantees the next reasoning block starts with a fresh id rather
-        than reusing one already closed on the wire.  The persisted row is
-        not removed — it stays in ``session_messages`` as the durable
-        record of what was reasoned.
+        Idempotent — returns ``[]`` when no block is open.  Drains any
+        still-buffered delta first so the frontend never loses tail text
+        from the coalesce window.  The id rotation guarantees the next
+        reasoning block starts with a fresh id rather than reusing one
+        already closed on the wire.  The persisted row is not removed —
+        it stays in ``session_messages`` as the durable record of what
+        was reasoned.
         """
         if not self._open:
             return []
-        event = StreamReasoningEnd(id=self._block_id)
+        events: list[StreamBaseResponse] = []
+        if self._pending_delta:
+            events.append(
+                StreamReasoningDelta(id=self._block_id, delta=self._pending_delta)
+            )
+            self._pending_delta = ""
+        events.append(StreamReasoningEnd(id=self._block_id))
         self._open = False
         self._block_id = str(uuid.uuid4())
         self._current_row = None
-        return [event]
+        return events

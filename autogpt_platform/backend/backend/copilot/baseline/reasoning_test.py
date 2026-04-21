@@ -212,7 +212,12 @@ class TestBaselineReasoningEmitter:
         assert emitter.is_open is True
 
     def test_subsequent_deltas_reuse_block_id_without_new_start(self):
-        emitter = BaselineReasoningEmitter()
+        # Disable coalescing so each chunk flushes immediately — this test
+        # is about the Start/Delta/block-id state machine, not the coalesce
+        # window.  Coalescing behaviour is covered below.
+        emitter = BaselineReasoningEmitter(
+            coalesce_min_chars=0, coalesce_max_interval_ms=0
+        )
         first = emitter.on_delta(_delta(reasoning="a"))
         second = emitter.on_delta(_delta(reasoning="b"))
 
@@ -265,6 +270,106 @@ class TestBaselineReasoningEmitter:
         deltas = [e for e in events if isinstance(e, StreamReasoningDelta)]
         assert len(deltas) == 1
         assert deltas[0].delta == "plan: do the thing"
+
+
+class TestReasoningDeltaCoalescing:
+    """Coalescing batches fine-grained provider chunks into bigger wire
+    frames.  OpenRouter's Kimi K2.6 emits ~4,700 reasoning-delta chunks
+    per turn vs ~28 for Sonnet; without batching, every chunk becomes one
+    Redis ``xadd`` + one SSE event + one React re-render of the
+    non-virtualised chat list, which paint-storms the browser.  These
+    tests pin the batching contract: small chunks buffer until the
+    char-size or time threshold trips, large chunks still flush
+    immediately, and ``close()`` never drops tail text."""
+
+    def test_small_chunks_after_first_buffer_until_threshold(self):
+        # Generous time threshold so size alone controls flush timing.
+        emitter = BaselineReasoningEmitter(
+            coalesce_min_chars=32, coalesce_max_interval_ms=60_000
+        )
+        # First chunk always flushes immediately (so UI renders without
+        # waiting).
+        first = emitter.on_delta(_delta(reasoning="hi "))
+        assert any(isinstance(e, StreamReasoningStart) for e in first)
+        assert sum(isinstance(e, StreamReasoningDelta) for e in first) == 1
+
+        # Subsequent small chunks buffer silently — 5 × 4 chars = 20 chars,
+        # still under the 32-char threshold.
+        for _ in range(5):
+            assert emitter.on_delta(_delta(reasoning="abcd")) == []
+
+        # Once the threshold is crossed, the accumulated buffer flushes
+        # as a single StreamReasoningDelta carrying every buffered chunk.
+        flush = emitter.on_delta(_delta(reasoning="efghijklmnop"))
+        assert len(flush) == 1
+        assert isinstance(flush[0], StreamReasoningDelta)
+        assert flush[0].delta == "abcd" * 5 + "efghijklmnop"
+
+    def test_time_based_flush_when_chars_stay_below_threshold(self, monkeypatch):
+        # Fake ``time.monotonic`` so we can drive the time-based branch
+        # deterministically without real sleeps.
+        from backend.copilot.baseline import reasoning as rmod
+
+        fake_now = [0.0]
+        monkeypatch.setattr(rmod.time, "monotonic", lambda: fake_now[0])
+
+        emitter = BaselineReasoningEmitter(
+            coalesce_min_chars=1000, coalesce_max_interval_ms=40
+        )
+        # t=0: first chunk flushes immediately.
+        first = emitter.on_delta(_delta(reasoning="a"))
+        assert sum(isinstance(e, StreamReasoningDelta) for e in first) == 1
+
+        # t=10 ms: still under 40 ms → buffer.
+        fake_now[0] = 0.010
+        assert emitter.on_delta(_delta(reasoning="b")) == []
+
+        # t=50 ms since last flush → time threshold trips, flush fires.
+        fake_now[0] = 0.060
+        flushed = emitter.on_delta(_delta(reasoning="c"))
+        assert len(flushed) == 1
+        assert isinstance(flushed[0], StreamReasoningDelta)
+        assert flushed[0].delta == "bc"
+
+    def test_close_flushes_tail_buffer_before_end(self):
+        emitter = BaselineReasoningEmitter(
+            coalesce_min_chars=1000, coalesce_max_interval_ms=60_000
+        )
+        emitter.on_delta(_delta(reasoning="first"))  # flushes (first chunk)
+        emitter.on_delta(_delta(reasoning=" middle "))  # buffered
+        emitter.on_delta(_delta(reasoning="tail"))  # buffered
+
+        events = emitter.close()
+        assert len(events) == 2
+        assert isinstance(events[0], StreamReasoningDelta)
+        assert events[0].delta == " middle tail"
+        assert isinstance(events[1], StreamReasoningEnd)
+
+    def test_coalesce_disabled_flushes_every_chunk(self):
+        emitter = BaselineReasoningEmitter(
+            coalesce_min_chars=0, coalesce_max_interval_ms=0
+        )
+        first = emitter.on_delta(_delta(reasoning="a"))
+        second = emitter.on_delta(_delta(reasoning="b"))
+        assert sum(isinstance(e, StreamReasoningDelta) for e in first) == 1
+        assert sum(isinstance(e, StreamReasoningDelta) for e in second) == 1
+
+    def test_persistence_stays_per_delta_even_when_wire_coalesces(self):
+        """DB row content must track every chunk so a crash mid-turn
+        persists the full reasoning-so-far, even if the coalesce window
+        never flushed those chunks to the wire."""
+        session: list[ChatMessage] = []
+        emitter = BaselineReasoningEmitter(
+            session,
+            coalesce_min_chars=1000,
+            coalesce_max_interval_ms=60_000,
+        )
+        emitter.on_delta(_delta(reasoning="first "))
+        emitter.on_delta(_delta(reasoning="chunk "))
+        emitter.on_delta(_delta(reasoning="three"))
+        # No close; verify the persisted row already has everything.
+        assert len(session) == 1
+        assert session[0].content == "first chunk three"
 
 
 class TestReasoningPersistence:
