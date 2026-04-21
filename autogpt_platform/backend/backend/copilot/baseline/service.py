@@ -340,9 +340,7 @@ class _BaselineStreamState:
     assistant_text: str = ""
     text_block_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     text_started: bool = False
-    reasoning_emitter: BaselineReasoningEmitter = field(
-        default_factory=BaselineReasoningEmitter
-    )
+    reasoning_emitter: BaselineReasoningEmitter = field(init=False)
     turn_prompt_tokens: int = 0
     turn_completion_tokens: int = 0
     turn_cache_read_tokens: int = 0
@@ -366,6 +364,14 @@ class _BaselineStreamState:
     # iteration.  ``None`` means "not yet computed" (or the first message
     # wasn't a system role, so no marking applies).
     cached_system_message: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        # Wire the reasoning emitter to ``session_messages`` so it can
+        # append ``role="reasoning"`` rows as reasoning streams in — the
+        # frontend's ``convertChatSessionToUiMessages`` relies on these
+        # rows to render the Reasoning collapse after the AI SDK's
+        # stream-end hydrate swaps in the DB-backed message list.
+        self.reasoning_emitter = BaselineReasoningEmitter(self.session_messages)
 
 
 def _is_anthropic_model(model: str) -> bool:

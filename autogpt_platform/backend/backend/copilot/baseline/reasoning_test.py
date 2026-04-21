@@ -14,6 +14,7 @@ from backend.copilot.baseline.reasoning import (
     ReasoningDetail,
     reasoning_extra_body,
 )
+from backend.copilot.model import ChatMessage
 from backend.copilot.response_model import (
     StreamReasoningDelta,
     StreamReasoningEnd,
@@ -170,3 +171,58 @@ class TestBaselineReasoningEmitter:
         deltas = [e for e in events if isinstance(e, StreamReasoningDelta)]
         assert len(deltas) == 1
         assert deltas[0].delta == "plan: do the thing"
+
+
+class TestReasoningPersistence:
+    """The persistence contract: without ``role="reasoning"`` rows in
+    session.messages, useHydrateOnStreamEnd overwrites the live-streamed
+    reasoning parts and the Reasoning collapse vanishes.  Every delta
+    must be reflected in the persisted row the moment it's emitted."""
+
+    def test_session_row_appended_on_first_delta(self):
+        session: list[ChatMessage] = []
+        emitter = BaselineReasoningEmitter(session)
+
+        assert session == []
+        emitter.on_delta(_delta(reasoning="hi"))
+        assert len(session) == 1
+        assert session[0].role == "reasoning"
+        assert session[0].content == "hi"
+
+    def test_subsequent_deltas_mutate_same_row(self):
+        session: list[ChatMessage] = []
+        emitter = BaselineReasoningEmitter(session)
+
+        emitter.on_delta(_delta(reasoning="part one "))
+        emitter.on_delta(_delta(reasoning="part two"))
+
+        assert len(session) == 1
+        assert session[0].content == "part one part two"
+
+    def test_close_keeps_row_in_session(self):
+        session: list[ChatMessage] = []
+        emitter = BaselineReasoningEmitter(session)
+
+        emitter.on_delta(_delta(reasoning="thought"))
+        emitter.close()
+
+        assert len(session) == 1
+        assert session[0].content == "thought"
+
+    def test_second_reasoning_block_appends_new_row(self):
+        session: list[ChatMessage] = []
+        emitter = BaselineReasoningEmitter(session)
+
+        emitter.on_delta(_delta(reasoning="first"))
+        emitter.close()
+        emitter.on_delta(_delta(reasoning="second"))
+
+        assert len(session) == 2
+        assert [m.content for m in session] == ["first", "second"]
+
+    def test_no_session_means_no_persistence(self):
+        """Emitter without attached session list emits wire events only."""
+        emitter = BaselineReasoningEmitter()
+        events = emitter.on_delta(_delta(reasoning="pure wire"))
+        assert len(events) == 2  # start + delta, no crash
+        # Nothing else to assert — just proves None session is supported.
