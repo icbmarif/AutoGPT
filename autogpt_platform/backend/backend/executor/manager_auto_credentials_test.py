@@ -374,3 +374,43 @@ async def test_acquire_auto_credentials_releases_partial_locks_on_failure(
         )
 
     good_lock.release.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_acquire_auto_credentials_rejects_empty_string_credential_id(
+    mocker: MockerFixture,
+):
+    """Corrupted state: ``_credentials_id`` set to an empty string used to
+    slip through ``if cred_id:`` and run without injecting credentials.
+    Now it raises so the user re-authenticates rather than executing a
+    block that silently has no creds."""
+    from backend.executor.manager import _acquire_auto_credentials
+
+    manager = mocker.AsyncMock()
+
+    input_model = mocker.MagicMock()
+    input_model.get_auto_credentials_fields.return_value = {
+        "credentials": {
+            "field_name": "spreadsheet",
+            "config": {"provider": "google", "type": "oauth2"},
+        }
+    }
+
+    input_data = {
+        "spreadsheet": {
+            "_credentials_id": "",  # corrupted empty string
+            "id": "file-123",
+            "name": "test.xlsx",
+        }
+    }
+
+    with pytest.raises(ValueError, match="empty or invalid"):
+        await _acquire_auto_credentials(
+            input_model=input_model,
+            input_data=input_data,
+            creds_manager=manager,
+            user_id="user-1",
+        )
+
+    # Never tried to acquire the (empty) credential.
+    manager.acquire.assert_not_called()

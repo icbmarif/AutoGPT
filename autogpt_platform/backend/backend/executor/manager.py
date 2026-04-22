@@ -163,29 +163,45 @@ async def _acquire_auto_credentials(
                 # Check if _credentials_id key exists in the field data
                 if "_credentials_id" in field_data:
                     cred_id = field_data["_credentials_id"]
-                    if cred_id:
-                        # Credential ID provided - acquire credentials
+                    if cred_id is None:
+                        # Explicitly None means the value is being chained in
+                        # at execution time from an upstream block — skip.
+                        continue
+                    if not isinstance(cred_id, str) or not cred_id.strip():
+                        # Non-string or empty string is corrupted state.
+                        # Fail loudly so the user re-authenticates rather
+                        # than silently running with no creds.
                         provider = info.get("config", {}).get(
                             "provider", "external service"
                         )
                         file_name = field_data.get("name", "selected file")
-                        try:
-                            credentials, lock = await creds_manager.acquire(
-                                user_id, cred_id
-                            )
-                            locks.append(lock)
-                            extra_exec_kwargs[kwarg_name] = credentials
-                        except ValueError:
-                            raise ValueError(
-                                f"{provider.capitalize()} credentials for "
-                                f"'{file_name}' in field '{field_name}' are not "
-                                f"available in your account. "
-                                f"This can happen if the agent was created by another "
-                                f"user or the credentials were deleted. "
-                                f"Please open the agent in the builder and re-select "
-                                f"the file to authenticate with your own account."
-                            )
-                    # else: _credentials_id is explicitly None, skip (chained data)
+                        raise ValueError(
+                            f"{provider.capitalize()} credential id for "
+                            f"'{file_name}' in field '{field_name}' is empty "
+                            f"or invalid. Please open the agent in the "
+                            f"builder and re-select the file."
+                        )
+                    # Credential ID provided - acquire credentials
+                    provider = info.get("config", {}).get(
+                        "provider", "external service"
+                    )
+                    file_name = field_data.get("name", "selected file")
+                    try:
+                        credentials, lock = await creds_manager.acquire(
+                            user_id, cred_id
+                        )
+                        locks.append(lock)
+                        extra_exec_kwargs[kwarg_name] = credentials
+                    except ValueError:
+                        raise ValueError(
+                            f"{provider.capitalize()} credentials for "
+                            f"'{file_name}' in field '{field_name}' are not "
+                            f"available in your account. "
+                            f"This can happen if the agent was created by another "
+                            f"user or the credentials were deleted. "
+                            f"Please open the agent in the builder and re-select "
+                            f"the file to authenticate with your own account."
+                        )
                 else:
                     # _credentials_id key missing entirely - this is an error
                     provider = info.get("config", {}).get(

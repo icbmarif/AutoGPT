@@ -1413,6 +1413,51 @@ async def test_validate_node_input_credentials_auto_creds_uses_marker_prefix(
 
 
 @pytest.mark.asyncio
+async def test_validate_node_input_credentials_auto_creds_empty_string_id(
+    mocker: MockerFixture,
+):
+    """A ``_credentials_id`` set to an empty string is a corrupted state —
+    the validator must treat it like a missing credential, not silently
+    pass. Without this guard, \`if cred_id and isinstance(cred_id, str)\`
+    evaluated to False and the node ran with no credentials injected."""
+    from backend.executor.utils import _validate_node_input_credentials
+
+    mock_node = mocker.MagicMock()
+    mock_node.id = "node-with-empty-string-cred"
+    mock_node.credentials_optional = False
+    mock_node.input_default = {
+        "spreadsheet": {
+            "_credentials_id": "",  # corrupted
+            "id": "file-123",
+            "name": "test.xlsx",
+        }
+    }
+
+    mock_block = mocker.MagicMock()
+    mock_block.input_schema.get_credentials_fields.return_value = {}
+    mock_block.input_schema.get_auto_credentials_fields.return_value = {
+        "credentials": {
+            "field_name": "spreadsheet",
+            "config": {"provider": "google", "type": "oauth2"},
+        }
+    }
+    mock_block.input_schema.get_required_fields.return_value = ["spreadsheet"]
+    mock_node.block = mock_block
+
+    mock_graph = mocker.MagicMock()
+    mock_graph.nodes = [mock_node]
+
+    errors, _ = await _validate_node_input_credentials(
+        graph=mock_graph,
+        user_id="some-user",
+        nodes_input_masks=None,
+    )
+
+    assert mock_node.id in errors
+    assert "spreadsheet" in errors[mock_node.id]
+
+
+@pytest.mark.asyncio
 async def test_validate_node_input_credentials_auto_creds_skipped_when_none(
     mocker: MockerFixture,
 ):

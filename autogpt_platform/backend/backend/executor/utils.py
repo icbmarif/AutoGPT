@@ -447,25 +447,42 @@ async def _validate_node_input_credentials(
                         )
                         continue
                     cred_id = field_value.get("_credentials_id")
-                    if cred_id and isinstance(cred_id, str):
-                        try:
-                            creds_store = get_integration_credentials_store()
-                            creds = await creds_store.get_creds_by_id(user_id, cred_id)
-                        except Exception as e:
-                            has_missing_credentials = True
-                            if field_is_optional:
-                                continue
-                            credential_errors[node.id][
-                                field_name
-                            ] = f"{CRED_ERR_NOT_AVAILABLE_PREFIX} {e}"
+                    if cred_id is None:
+                        # Explicitly None means the value is being chained in
+                        # at execution time from an upstream block — skip.
+                        continue
+                    if not isinstance(cred_id, str) or not cred_id.strip():
+                        # Non-string or empty string is a corrupted state —
+                        # treat it like a missing credential so the user
+                        # re-authenticates rather than silently running with
+                        # no creds.
+                        has_missing_credentials = True
+                        if field_is_optional:
                             continue
-                        if not creds:
-                            has_missing_credentials = True
-                            if field_is_optional:
-                                continue
-                            credential_errors[node.id][
-                                field_name
-                            ] = f"{CRED_ERR_UNKNOWN_PREFIX}{cred_id}"
+                        credential_errors[node.id][field_name] = (
+                            f"{CRED_ERR_NOT_AVAILABLE_PREFIX} credential id "
+                            "on the selected file is empty or invalid. "
+                            "Please re-select the file."
+                        )
+                        continue
+                    try:
+                        creds_store = get_integration_credentials_store()
+                        creds = await creds_store.get_creds_by_id(user_id, cred_id)
+                    except Exception as e:
+                        has_missing_credentials = True
+                        if field_is_optional:
+                            continue
+                        credential_errors[node.id][
+                            field_name
+                        ] = f"{CRED_ERR_NOT_AVAILABLE_PREFIX} {e}"
+                        continue
+                    if not creds:
+                        has_missing_credentials = True
+                        if field_is_optional:
+                            continue
+                        credential_errors[node.id][
+                            field_name
+                        ] = f"{CRED_ERR_UNKNOWN_PREFIX}{cred_id}"
 
         # If node has optional credentials and any are missing, skip the
         # node so the executor doesn't try to execute it with None creds.
