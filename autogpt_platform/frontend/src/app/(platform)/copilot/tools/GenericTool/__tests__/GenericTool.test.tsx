@@ -253,5 +253,64 @@ describe("GenericTool", () => {
       const normalized = (container.textContent ?? "").replace(/ /g, " ");
       expect(normalized).toContain('Searched "kimi k2.6"');
     });
+
+    it("uses '(untitled)' when a search result has no title", () => {
+      render(
+        <GenericTool
+          part={makeWebSearchPart([
+            { url: "https://example.com/x", snippet: "No title here" },
+          ])}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { expanded: false }));
+      const link = screen.getByRole("link", {
+        name: "(untitled)",
+      }) as HTMLAnchorElement;
+      expect(link.getAttribute("href")).toBe("https://example.com/x");
+    });
+  });
+
+  describe("getWebAccordionData non-results fallback", () => {
+    function makeWebFetchPart(output: Record<string, unknown>): ToolUIPart {
+      return {
+        type: "tool-web_fetch",
+        toolCallId: "call-fetch-1",
+        state: "output-available",
+        input: { url: "https://example.com/page" },
+        output,
+      } as unknown as ToolUIPart;
+    }
+
+    it("renders 'Web fetch' title when output has content instead of results", () => {
+      render(
+        <GenericTool part={makeWebFetchPart({ content: "fetched body" })} />,
+      );
+      const trigger = screen.getByRole("button", { expanded: false });
+      expect(trigger.textContent).toContain("Web fetch");
+      fireEvent.click(trigger);
+      expect(screen.queryByText("fetched body")).not.toBeNull();
+    });
+
+    it("renders 'Response (N)' title when output has a status_code", () => {
+      render(
+        <GenericTool
+          part={makeWebFetchPart({ status_code: 404, message: "not found" })}
+        />,
+      );
+      const trigger = screen.getByRole("button", { expanded: false });
+      expect(trigger.textContent).toContain("Response (404)");
+    });
+
+    it("falls back to MCP text blocks when direct content is absent", () => {
+      render(
+        <GenericTool
+          part={makeWebFetchPart({
+            content: [{ type: "text", text: "mcp body" }],
+          })}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { expanded: false }));
+      expect(screen.queryByText("mcp body")).not.toBeNull();
+    });
   });
 });
