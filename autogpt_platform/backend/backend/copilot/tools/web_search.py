@@ -1,33 +1,36 @@
-"""Web search tool — routes through OpenRouter.
+"""Web search tool — Perplexity Sonar via OpenRouter.
 
-Two tiers, one handler, one billing path:
+One provider, two tiers, one billing path:
 
-* ``deep=False`` (default) — OpenRouter's ``openrouter:web_search`` server
-  tool with a cheap dispatch model.  Fast and shallow, ~$0.02/call at 5
-  results.
-* ``deep=True`` — Perplexity ``sonar-deep-research`` via OpenRouter.
-  Multi-step reasoning grounded on the web; slower and more expensive
-  (~$0.05–0.15/call depending on how many hops the model takes).
+* ``deep=False`` (default) — ``perplexity/sonar``.  Searches the web
+  natively and returns citation annotations in a single inference pass.
+* ``deep=True`` — ``perplexity/sonar-deep-research``.  Multi-step
+  agentic research; slower and costlier.
 
-OpenRouter standardises ``url_citation`` annotations across engines and
-models, so both paths share one extractor.  ``resp.usage.cost`` carries
-the real billed value (search fee + tokens) and flows through
+Why Sonar and not the ``openrouter:web_search`` server tool + dispatch
+model?  The server tool feeds all search-result page content back into
+the dispatch model for a second inference pass — one observed call was
+74K input tokens at Gemini Flash rates, billing $0.072.  Sonar
+searches natively in one pass, returns annotations typed as
+``ChatCompletionMessage.annotations`` in ``openai.types``, and at
+$1 / MTok base pricing lands ~$0.01 / call at our default shape.
+
+``resp.usage.cost`` carries the real billed value via OpenRouter's
+``include: true`` extension; the value flows through
 ``persist_and_record_usage(provider='open_router')`` into the daily /
 weekly microdollar rate-limit counter on the same rails as every other
 OpenRouter turn — no separate provider ledger line, no estimation
-drift.
-
-The three helpers (``_build_web_search_extra_body`` /
-``_extract_results`` / ``_extract_cost_usd``) take and return data with
-zero coupling to the tool class — a future refactor can lift them into
-``backend/util/openrouter_search.py`` so AI-generator blocks can reuse
-them.
+drift.  ``_extract_cost_usd`` mirrors the baseline service's
+``_extract_usage_cost`` logic; keep the two in sync if one changes.
 """
 
 import logging
+import math
 from typing import Any
 
 from openai import AsyncOpenAI
+from openai.types import CompletionUsage
+from openai.types.chat import ChatCompletion
 
 from backend.copilot.config import ChatConfig
 from backend.copilot.model import ChatSession
@@ -40,18 +43,20 @@ logger = logging.getLogger(__name__)
 
 _chat_config = ChatConfig()
 
-# Quick path — cheap tokens, reliable tool-calling; the ~$0.02 Exa
-# search fee dominates either way.
-_QUICK_DISPATCH_MODEL = "google/gemini-2.5-flash"
-_QUICK_MAX_TOKENS = 64
+_QUICK_MODEL = "perplexity/sonar"
+_QUICK_MAX_TOKENS = 1024
 
-# Deep path — Perplexity sonar searches + reasons multi-step natively.
 _DEEP_MODEL = "perplexity/sonar-deep-research"
 _DEEP_MAX_TOKENS = 4096
 
 _DEFAULT_MAX_RESULTS = 5
 _HARD_MAX_RESULTS = 20
 _SNIPPET_MAX_CHARS = 500
+
+# OpenRouter-specific extra_body flag that embeds the real generation
+# cost into the response usage object.  Same dict shape the baseline
+# service uses — keep the two aligned.
+_OPENROUTER_INCLUDE_USAGE_COST: dict[str, Any] = {"usage": {"include": True}}
 
 
 class WebSearchTool(BaseTool):
@@ -82,7 +87,7 @@ class WebSearchTool(BaseTool):
                     "type": "integer",
                     "description": (
                         f"Max results (default {_DEFAULT_MAX_RESULTS}, "
-                        f"cap {_HARD_MAX_RESULTS}). Ignored when deep=true."
+                        f"cap {_HARD_MAX_RESULTS})."
                     ),
                     "default": _DEFAULT_MAX_RESULTS,
                 },
@@ -143,21 +148,15 @@ class WebSearchTool(BaseTool):
         client = AsyncOpenAI(
             api_key=_chat_config.api_key, base_url=_chat_config.base_url
         )
-        if deep:
-            model_used = _DEEP_MODEL
-            max_tokens = _DEEP_MAX_TOKENS
-            extra_body: dict[str, Any] = {"usage": {"include": True}}
-        else:
-            model_used = _QUICK_DISPATCH_MODEL
-            max_tokens = _QUICK_MAX_TOKENS
-            extra_body = _build_web_search_extra_body(max_results)
+        model_used = _DEEP_MODEL if deep else _QUICK_MODEL
+        max_tokens = _DEEP_MAX_TOKENS if deep else _QUICK_MAX_TOKENS
 
         try:
             resp = await client.chat.completions.create(
                 model=model_used,
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": query}],
-                extra_body=extra_body,
+                extra_body=_OPENROUTER_INCLUDE_USAGE_COST,
             )
         except Exception as exc:
             logger.warning(
@@ -173,15 +172,14 @@ class WebSearchTool(BaseTool):
             )
 
         results = _extract_results(resp, limit=max_results)
-        cost_usd = _extract_cost_usd(resp)
+        cost_usd = _extract_cost_usd(resp.usage)
 
         try:
-            usage = getattr(resp, "usage", None)
             await persist_and_record_usage(
                 session=session,
                 user_id=user_id,
-                prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-                completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                prompt_tokens=resp.usage.prompt_tokens if resp.usage else 0,
+                completion_tokens=resp.usage.completion_tokens if resp.usage else 0,
                 log_prefix="[web_search]",
                 cost_usd=cost_usd,
                 model=model_used,
@@ -199,75 +197,71 @@ class WebSearchTool(BaseTool):
         )
 
 
-def _build_web_search_extra_body(max_results: int) -> dict[str, Any]:
-    """``extra_body`` fragment enabling the OpenRouter web-search server
-    tool and forcing it to fire.  Lifted out so blocks that want the
-    same behaviour can reuse it as-is."""
-    return {
-        "tools": [
-            {
-                "type": "openrouter:web_search",
-                "openrouter:web_search": {"max_results": max_results},
-            }
-        ],
-        "tool_choice": "required",
-        "usage": {"include": True},
-    }
+def _extract_results(resp: ChatCompletion, *, limit: int) -> list[WebSearchResult]:
+    """Pull ``url_citation`` annotations from the response.
 
-
-def _extract_results(resp: Any, *, limit: int) -> list[WebSearchResult]:
-    """Pull ``url_citation`` annotations from an OpenRouter response.
-
-    Shared between the quick (server tool) and deep (Perplexity sonar)
-    paths — OpenRouter standardises the annotation schema across engines
-    and models.
+    Shared across both tiers — OpenRouter normalises the annotation
+    schema across Perplexity's sonar models into
+    ``Annotation.url_citation`` (typed in ``openai.types.chat``).  The
+    ``content`` snippet is an OpenRouter extension on the otherwise-
+    typed ``AnnotationURLCitation``; pydantic stashes unknown fields in
+    ``model_extra``, which we read there rather than via ``getattr``.
     """
-    results: list[WebSearchResult] = []
-    choices = getattr(resp, "choices", []) or []
-    if not choices:
-        return results
-
-    message = getattr(choices[0], "message", None)
-    annotations = getattr(message, "annotations", None) or []
+    if not resp.choices:
+        return []
+    annotations = resp.choices[0].message.annotations or []
+    out: list[WebSearchResult] = []
     for ann in annotations:
-        if len(results) >= limit:
+        if len(out) >= limit:
             break
-        if _get(ann, "type") != "url_citation":
+        if ann.type != "url_citation":
             continue
-        citation = _get(ann, "url_citation") or {}
-        results.append(
+        citation = ann.url_citation
+        extras = citation.model_extra or {}
+        snippet_raw = extras.get("content")
+        snippet = (snippet_raw or "")[:_SNIPPET_MAX_CHARS] if snippet_raw else ""
+        out.append(
             WebSearchResult(
-                title=_get(citation, "title") or "",
-                url=_get(citation, "url") or "",
-                snippet=(_get(citation, "content") or "")[:_SNIPPET_MAX_CHARS],
+                title=citation.title,
+                url=citation.url,
+                snippet=snippet,
                 page_age=None,
             )
         )
-    return results
+    return out
 
 
-def _extract_cost_usd(resp: Any) -> float | None:
-    """Return ``usage.cost`` from the OpenRouter response, or None.
+def _extract_cost_usd(usage: CompletionUsage | None) -> float | None:
+    """Return the provider-reported USD cost off the response usage.
 
-    Populated when the request includes ``extra_body.usage.include=True``.
-    Falls back to ``usage.model_dump()`` for SDK versions that return
-    dict-like usage objects without a typed ``cost`` attribute.
+    OpenRouter piggybacks a ``cost`` field on the OpenAI-compatible
+    usage object when the request body includes
+    ``usage: {"include": True}``.  The OpenAI SDK's typed
+    ``CompletionUsage`` does not declare it, so we read it off
+    ``model_extra`` (the pydantic v2 container for extras) to keep
+    access fully typed — no ``getattr``.  Mirrors the baseline service
+    ``_extract_usage_cost``; keep the two in sync.
+
+    Returns ``None`` when the field is absent, null, non-numeric,
+    non-finite, or negative.  Invalid values log at error level because
+    they indicate a provider bug worth chasing; plain absences are
+    silent so the caller can dedupe the "missing cost" warning.
     """
-    usage = getattr(resp, "usage", None)
     if usage is None:
         return None
-    val = getattr(usage, "cost", None)
-    if val is None and hasattr(usage, "model_dump"):
-        val = usage.model_dump().get("cost")
-    try:
-        return float(val) if val is not None else None
-    except (TypeError, ValueError):
+    extras = usage.model_extra or {}
+    if "cost" not in extras:
         return None
-
-
-def _get(obj: Any, key: str) -> Any:
-    """Uniform attribute / dict key access — OpenRouter annotations ship
-    as either dicts (raw JSON path) or pydantic objects (parsed path)."""
-    if isinstance(obj, dict):
-        return obj.get(key)
-    return getattr(obj, key, None)
+    raw = extras["cost"]
+    if raw is None:
+        logger.error("[web_search] usage.cost is present but null")
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        logger.error("[web_search] usage.cost is not numeric: %r", raw)
+        return None
+    if not math.isfinite(val) or val < 0:
+        logger.error("[web_search] usage.cost is non-finite or negative: %r", val)
+        return None
+    return val
