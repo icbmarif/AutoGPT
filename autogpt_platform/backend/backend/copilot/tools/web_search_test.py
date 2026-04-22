@@ -91,9 +91,7 @@ class TestExtractResults:
 
     def test_limit_caps_returned_results(self):
         resp = _fake_openrouter_response(
-            citations=[
-                {"title": f"r{i}", "url": f"https://e/{i}"} for i in range(10)
-            ]
+            citations=[{"title": f"r{i}", "url": f"https://e/{i}"} for i in range(10)]
         )
         out = _extract_results(resp, limit=3)
         assert len(out) == 3
