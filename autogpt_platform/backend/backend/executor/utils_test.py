@@ -1219,8 +1219,8 @@ async def test_validate_node_input_credentials_auto_creds_missing(
     assert "spreadsheet" in errors[mock_node.id]
     # Error message uses the CRED_ERR_UNKNOWN_PREFIX marker so the copilot
     # credential-race fallback recognises it as a credentials gate failure.
-    assert errors[mock_node.id]["spreadsheet"].lower().startswith(
-        "unknown credentials #"
+    assert (
+        errors[mock_node.id]["spreadsheet"].lower().startswith("unknown credentials #")
     )
 
 

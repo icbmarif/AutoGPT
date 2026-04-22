@@ -779,6 +779,7 @@ async def _merge_or_create_credential(
             for c in existing_creds
             if isinstance(c, OAuth2Credentials)
             and not c.is_managed
+            and not is_system_credential(c.id)
             and c.username is not None
             and c.username == credentials.username
         ),
@@ -806,6 +807,16 @@ async def _upgrade_existing_credential(
     new_credentials: OAuth2Credentials,
 ) -> OAuth2Credentials:
     """Merge scopes from *new_credentials* into an existing credential."""
+    # Defense-in-depth: re-check system and provider invariants right before
+    # the write.  The login-time check in `_prepare_scope_upgrade` can go stale
+    # by the time the callback runs, and the implicit-merge path bypasses
+    # login-time validation entirely, so every write-path must enforce these
+    # on its own.
+    if is_system_credential(existing_cred_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="System credentials cannot be upgraded",
+        )
     existing = await creds_manager.store.get_creds_by_id(user_id, existing_cred_id)
     if not existing or not isinstance(existing, OAuth2Credentials):
         raise HTTPException(
@@ -816,6 +827,11 @@ async def _upgrade_existing_credential(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Managed credentials cannot be upgraded",
+        )
+    if not provider_matches(existing.provider, new_credentials.provider):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Credential provider does not match the requested provider",
         )
 
     if (

@@ -714,6 +714,150 @@ class TestSystemCredentialProtection:
         # The store lookup must never happen for system credentials.
         mock_mgr.store.get_creds_by_id.assert_not_called()
 
+    def test_callback_rejects_upgrade_of_system_credential(self):
+        """Defense-in-depth: even if a stale login state points at a system
+        credential, the callback-time `_upgrade_existing_credential` must
+        reject it before persisting anything."""
+        existing = _make_google_oauth2_cred(cred_id="sys-cred-id")
+        new_cred = _make_google_oauth2_cred(
+            scopes=[
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/calendar.readonly",
+            ]
+        )
+        state = OAuthState(
+            token="state-token",
+            provider="google",
+            expires_at=9999999999,
+            scopes=["https://www.googleapis.com/auth/calendar.readonly"],
+            credential_id="sys-cred-id",
+        )
+        handler = MagicMock()
+        handler.exchange_code_for_tokens = AsyncMock(return_value=new_cred)
+        handler.handle_default_scopes.return_value = state.scopes
+
+        # is_system_credential returns True only when asked about "sys-cred-id"
+        # — emulating the real predicate that recognises platform-reserved IDs.
+        def _is_system(cred_id):
+            return cred_id == "sys-cred-id"
+
+        with (
+            patch(
+                "backend.api.features.integrations.router._get_provider_oauth_handler",
+                return_value=handler,
+            ),
+            patch(
+                "backend.api.features.integrations.router.is_system_credential",
+                side_effect=_is_system,
+            ),
+            patch("backend.api.features.integrations.router.creds_manager") as mock_mgr,
+        ):
+            mock_mgr.store.verify_state_token = AsyncMock(return_value=state)
+            mock_mgr.store.get_creds_by_id = AsyncMock(return_value=existing)
+            mock_mgr.update = AsyncMock()
+
+            resp = client.post(
+                "/google/callback",
+                json={"code": "auth-code", "state_token": "state-token"},
+            )
+
+        assert resp.status_code == 400
+        assert "system credentials" in resp.json()["detail"].lower()
+        # No write must have happened for the system credential.
+        mock_mgr.update.assert_not_called()
+
+    def test_implicit_merge_skips_system_credentials(self):
+        """The implicit (provider+username) merge filter must exclude system
+        credentials so a user login cannot accidentally overwrite one."""
+        system_match = _make_google_oauth2_cred(
+            cred_id="sys-cred-id", username="alice@gmail.com"
+        )
+        new_cred = _make_google_oauth2_cred(
+            cred_id="new-cred-id",
+            scopes=system_match.scopes,
+            username="alice@gmail.com",
+        )
+        state = OAuthState(
+            token="state-token",
+            provider="google",
+            expires_at=9999999999,
+            scopes=system_match.scopes,
+        )
+        handler = MagicMock()
+        handler.exchange_code_for_tokens = AsyncMock(return_value=new_cred)
+        handler.handle_default_scopes.return_value = state.scopes
+
+        def _is_system(cred_id):
+            return cred_id == "sys-cred-id"
+
+        with (
+            patch(
+                "backend.api.features.integrations.router._get_provider_oauth_handler",
+                return_value=handler,
+            ),
+            patch(
+                "backend.api.features.integrations.router.is_system_credential",
+                side_effect=_is_system,
+            ),
+            patch("backend.api.features.integrations.router.creds_manager") as mock_mgr,
+        ):
+            mock_mgr.store.verify_state_token = AsyncMock(return_value=state)
+            mock_mgr.store.get_creds_by_provider = AsyncMock(
+                return_value=[system_match]
+            )
+            mock_mgr.create = AsyncMock()
+            mock_mgr.update = AsyncMock()
+
+            resp = client.post(
+                "/google/callback",
+                json={"code": "auth-code", "state_token": "state-token"},
+            )
+
+        assert resp.status_code == 200
+        # Since the only provider+username match is a system credential, the
+        # callback must create a new credential rather than overwriting it.
+        mock_mgr.create.assert_called_once()
+        mock_mgr.update.assert_not_called()
+
+    def test_upgrade_rejects_provider_mismatch(self):
+        """Defense-in-depth: if a stale login somehow passed validation but the
+        stored credential's provider no longer matches the new token's
+        provider, the write-path must refuse to overwrite it."""
+        existing = _make_google_oauth2_cred(cred_id="mixed-up-cred")
+        # Simulate a provider drift: the new credential exchange returned a
+        # different provider than what's stored on disk.
+        new_cred = _make_github_oauth2_cred(cred_id="mixed-up-cred")
+        state = OAuthState(
+            token="state-token",
+            provider="google",
+            expires_at=9999999999,
+            scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+            credential_id="mixed-up-cred",
+        )
+        handler = MagicMock()
+        handler.exchange_code_for_tokens = AsyncMock(return_value=new_cred)
+        handler.handle_default_scopes.return_value = state.scopes
+
+        with (
+            patch(
+                "backend.api.features.integrations.router._get_provider_oauth_handler",
+                return_value=handler,
+            ),
+            patch("backend.api.features.integrations.router.creds_manager") as mock_mgr,
+        ):
+            mock_mgr.store.verify_state_token = AsyncMock(return_value=state)
+            mock_mgr.store.get_creds_by_id = AsyncMock(return_value=existing)
+            mock_mgr.update = AsyncMock()
+
+            resp = client.post(
+                "/google/callback",
+                json={"code": "auth-code", "state_token": "state-token"},
+            )
+
+        assert resp.status_code == 400
+        assert "provider" in resp.json()["detail"].lower()
+        mock_mgr.update.assert_not_called()
+
 
 class TestPreserveRefreshTokenAndUsername:
     """Incremental callbacks must not silently drop refresh_token/username."""
@@ -838,9 +982,7 @@ class TestImplicitMergeScopeGuard:
             cred_id="new-cred-id",
             scopes=["https://www.googleapis.com/auth/gmail.readonly"],
         )
-        state = self._build_state(
-            ["https://www.googleapis.com/auth/gmail.readonly"]
-        )
+        state = self._build_state(["https://www.googleapis.com/auth/gmail.readonly"])
         handler = MagicMock()
         handler.exchange_code_for_tokens = AsyncMock(return_value=new_cred)
         handler.handle_default_scopes.return_value = state.scopes
@@ -853,9 +995,7 @@ class TestImplicitMergeScopeGuard:
             patch("backend.api.features.integrations.router.creds_manager") as mock_mgr,
         ):
             mock_mgr.store.verify_state_token = AsyncMock(return_value=state)
-            mock_mgr.store.get_creds_by_provider = AsyncMock(
-                return_value=[existing]
-            )
+            mock_mgr.store.get_creds_by_provider = AsyncMock(return_value=[existing])
             mock_mgr.store.get_creds_by_id = AsyncMock(return_value=existing)
             mock_mgr.create = AsyncMock()
             mock_mgr.update = AsyncMock()
@@ -900,9 +1040,7 @@ class TestImplicitMergeScopeGuard:
             patch("backend.api.features.integrations.router.creds_manager") as mock_mgr,
         ):
             mock_mgr.store.verify_state_token = AsyncMock(return_value=state)
-            mock_mgr.store.get_creds_by_provider = AsyncMock(
-                return_value=[existing]
-            )
+            mock_mgr.store.get_creds_by_provider = AsyncMock(return_value=[existing])
             mock_mgr.store.get_creds_by_id = AsyncMock(return_value=existing)
             mock_mgr.create = AsyncMock()
             mock_mgr.update = AsyncMock()
